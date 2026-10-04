@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
-import { analyzeText, getGraph, getNodeDetails, uploadFile } from "./api";
+import {
+  analyzeText,
+  getGraph,
+  getNodeDetails,
+  getSources,
+  uploadFile,
+} from "./api";
 
 const buildGraphLayout = (nodes = []) => {
   if (!nodes.length) return [];
@@ -463,6 +469,13 @@ function App() {
     data: null,
     error: null,
   });
+
+  // Saved sources from the backend (GET /sources).
+  const [savedSources, setSavedSources] = useState([]);
+  const [sourcesState, setSourcesState] = useState({
+    loading: true,
+    error: null,
+  });
   const [activeDocumentId, setActiveDocumentId] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -562,6 +575,85 @@ function App() {
     detailsState.id === selectedNode ? detailsState : null;
   const detailsLoading = Boolean(selectedNode) && !selectedDetails;
 
+  // Load the saved sources on startup.
+  useEffect(() => {
+    let cancelled = false;
+
+    getSources()
+      .then((data) => {
+        if (cancelled) return;
+        setSavedSources(data);
+        setSourcesState({ loading: false, error: null });
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setSourcesState({ loading: false, error: error.message });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshSources = async () => {
+    setSourcesState((current) => ({ ...current, loading: true }));
+
+    try {
+      setSavedSources(await getSources());
+      setSourcesState({ loading: false, error: null });
+    } catch (error) {
+      setSourcesState({ loading: false, error: error.message });
+    }
+
+    // Per-document counts come from the graph, so reload it too.
+    try {
+      const data = await getGraph();
+      setGraph({ nodes: data.nodes, edges: data.edges });
+      setGraphError(null);
+    } catch (error) {
+      setGraphError(error.message);
+    }
+  };
+
+  // Documents added this session plus saved sources that are not already
+  // among them. Saved-only entries have no File, so `file.size` is null.
+  const allDocuments = useMemo(() => {
+    const sessionSourceIds = new Set(
+      documents.map((document) => document.sourceId).filter(Boolean)
+    );
+
+    const savedOnly = savedSources
+      .filter((source) => !sessionSourceIds.has(source.id))
+      .map((source) => ({
+        id: `source-${source.id}`,
+        file: { name: source.name, size: null },
+        status: "processed",
+        error: null,
+        sourceId: source.id,
+        analysis: null,
+        saved: true,
+        createdAt: source.created_at,
+      }));
+
+    return [...savedOnly, ...documents];
+  }, [documents, savedSources]);
+
+  // Node / connection counts for one source, from the loaded graph.
+  const countsForDocument = (document) =>
+    document.sourceId
+      ? {
+          nodes: graph.nodes.filter(
+            (node) => node.source_id === document.sourceId
+          ).length,
+          edges: graph.edges.filter(
+            (edge) => edge.source_id === document.sourceId
+          ).length,
+        }
+      : {
+          nodes: document.analysis?.nodes.length ?? 0,
+          edges: document.analysis?.edges.length ?? 0,
+        };
+
   const updateSetting = (key, value) => {
     setSettings((current) => ({
       ...current,
@@ -598,7 +690,7 @@ function App() {
    * =========================
    */
 
-  const processedDocuments = documents.filter(
+  const processedDocuments = allDocuments.filter(
     (document) => document.status === "processed"
   ).length;
 
@@ -620,7 +712,7 @@ function App() {
 
   const documentSearchResults =
     normalizedSearch.length > 0
-      ? documents
+      ? allDocuments
           .filter((document) => {
             const fileName = document.file.name.toLowerCase();
 
@@ -709,6 +801,15 @@ function App() {
           source_summary: result.source_summary,
         },
       });
+
+      // Refresh the saved sources so the new document is listed by the backend too.
+      // (If this fails, the document is still shown from this session.)
+      getSources()
+        .then((data) => {
+          setSavedSources(data);
+          setSourcesState({ loading: false, error: null });
+        })
+        .catch(() => {});
 
       // Refresh from the backend; if that fails, still show what /analyze returned.
       try {
@@ -951,7 +1052,7 @@ function App() {
   };
 
   const handleDocumentSearchResult = (documentId) => {
-    const document = documents.find(
+    const document = allDocuments.find(
       (item) => item.id === documentId
     );
 
@@ -1269,7 +1370,7 @@ function App() {
             <section className="stats">
               <div className="stat-card">
                 <span>Documents</span>
-                <strong>{documents.length}</strong>
+                <strong>{allDocuments.length}</strong>
               </div>
 
               <div className="stat-card">
@@ -1606,7 +1707,30 @@ function App() {
               </button>
             </div>
 
-            {documents.length === 0 ? (
+            {allDocuments.length === 0 && sourcesState.loading ? (
+              <div className="empty-page">
+                <span>□</span>
+
+                <h3>Loading your documents...</h3>
+
+                <p>Fetching saved documents from the backend.</p>
+              </div>
+            ) : allDocuments.length === 0 && sourcesState.error ? (
+              <div className="empty-page">
+                <span>□</span>
+
+                <h3>Could not load saved documents</h3>
+
+                <p>{sourcesState.error}</p>
+
+                <button
+                  className="upload-button"
+                  onClick={refreshSources}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : allDocuments.length === 0 ? (
               <div className="empty-page">
                 <span>□</span>
 
@@ -1628,7 +1752,14 @@ function App() {
               </div>
             ) : (
               <div className="documents-list">
-                {documents.map((document) => {
+                {sourcesState.error && (
+                  <span className="upload-hint">
+                    Could not refresh saved documents:{" "}
+                    {sourcesState.error}
+                  </span>
+                )}
+
+                {allDocuments.map((document) => {
                   const isActive =
                     document.id === activeDocumentId;
 
@@ -1668,12 +1799,15 @@ function App() {
                           </strong>
 
                           <span>
-                            {(
-                              document.file.size /
-                              1024 /
-                              1024
-                            ).toFixed(2)}{" "}
-                            MB
+                            {document.saved
+                              ? `Saved ${new Date(
+                                  document.createdAt
+                                ).toLocaleDateString()}`
+                              : `${(
+                                  document.file.size /
+                                  1024 /
+                                  1024
+                                ).toFixed(2)} MB`}
                             {" • "}
                             {getFileType(
                               document.file.name
@@ -1684,7 +1818,7 @@ function App() {
                             {isProcessing
                               ? "Processing document..."
                               : isProcessed
-                              ? `Processed • ${document.analysis?.nodes.length ?? 0} nodes • ${document.analysis?.edges.length ?? 0} connections`
+                              ? `Processed • ${countsForDocument(document).nodes} nodes • ${countsForDocument(document).edges} connections`
                               : isFailed
                               ? `Failed • ${document.error}`
                               : "Ready to process"}
@@ -1699,32 +1833,36 @@ function App() {
                           </span>
                         )}
 
-                        <button
-                          className="document-open-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
+                        {!document.saved && (
+                          <button
+                            className="document-open-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
 
-                            openDocument(
-                              document.id
-                            );
-                          }}
-                        >
-                          Open
-                        </button>
+                              openDocument(
+                                document.id
+                              );
+                            }}
+                          >
+                            Open
+                          </button>
+                        )}
 
-                        <button
-                          className="remove-file"
-                          onClick={(event) => {
-                            event.stopPropagation();
+                        {!document.saved && (
+                          <button
+                            className="remove-file"
+                            onClick={(event) => {
+                              event.stopPropagation();
 
-                            deleteDocument(
-                              document.id
-                            );
-                          }}
-                          aria-label={`Delete ${document.file.name}`}
-                        >
-                          ×
-                        </button>
+                              deleteDocument(
+                                document.id
+                              );
+                            }}
+                            aria-label={`Delete ${document.file.name}`}
+                          >
+                            ×
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

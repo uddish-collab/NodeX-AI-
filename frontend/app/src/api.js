@@ -84,3 +84,6 @@ export const getNodeDetails = async (nodeId) =>
     undefined,
     "Could not load node details"
   );
+
+export const getSources = async () =>
+  request("/sources", undefined, "Could not load saved documents");
