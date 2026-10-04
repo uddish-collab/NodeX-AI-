@@ -2940,3 +2940,19 @@ nav {
   font-size: 13px;
   opacity: 0.9;
 }
+
+/* Upload box: a failed upload shows (a shortened) error message; keep it inside the box */
+.upload-box > p.upload-error-text {
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Message bar: failed processing attempts */
+.search-message.search-feedback-error {
+  color: #ff8b9a;
+}
+
+.search-feedback.search-feedback-error span {
+  color: #ff6b81;
+}

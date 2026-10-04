@@ -493,6 +493,8 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false);
 
   const [searchMessage, setSearchMessage] = useState("");
+  // The message bar text that came from a failed processing attempt (styled as an error).
+  const [failureMessage, setFailureMessage] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
 
   const [isDragging, setIsDragging] = useState(false);
@@ -721,6 +723,7 @@ function App() {
   uploadDocument?.status === "uploaded" ||
   uploadDocument?.status === "analyzing";
   const processed = uploadDocument?.status === "processed";
+  const failed = uploadDocument?.status === "failed";
 
   /*
    * =========================
@@ -876,7 +879,9 @@ function App() {
         error: error.message,
       });
 
-      setSearchMessage(`${file.name}: ${error.message}`);
+      const message = `${file.name}: ${error.message}`;
+      setFailureMessage(message);
+      setSearchMessage(message);
     }
   };
 
@@ -1417,8 +1422,16 @@ function App() {
             <SearchBox {...searchBoxProps} />
 
             {searchMessage && (
-              <div className="search-message search-feedback">
-                <span>✓</span>
+              <div
+                className={`search-message search-feedback ${
+                  searchMessage === failureMessage
+                    ? "search-feedback-error"
+                    : ""
+                }`}
+              >
+                <span>
+                  {searchMessage === failureMessage ? "✕" : "✓"}
+                </span>
                 {searchMessage}
               </div>
             )}
@@ -1484,6 +1497,8 @@ function App() {
                       ? "◌"
                       : processed
                       ? "✓"
+                      : failed
+                      ? "!"
                       : "↑"}
                   </div>
 
@@ -1523,12 +1538,25 @@ function App() {
                       <h3>
                         {processed
                           ? "Document processed"
+                          : failed
+                          ? "Processing failed"
                           : "Document selected"}
                       </h3>
 
-                      <p>
+                      <p
+                        className={
+                          failed ? "upload-error-text" : undefined
+                        }
+                        title={failed ? uploadDocument.error : undefined}
+                      >
                         {processed
                           ? "Your knowledge map is ready to explore."
+                          : failed
+                          ? uploadDocument.error.length > 140
+                            ? `${uploadDocument.error
+                                .slice(0, 140)
+                                .trimEnd()}…`
+                            : uploadDocument.error
                           : "Your document is ready to be processed."}
                       </p>
                     </>
@@ -1560,7 +1588,7 @@ function App() {
                     <div className="selected-file">
                       <div className="selected-file-info">
                         <div className="selected-file-icon">
-                          {processed ? "✓" : "…"}
+                          {processed ? "✓" : failed ? "!" : "…"}
                         </div>
 
                         <div className="selected-file-details">
@@ -1580,6 +1608,8 @@ function App() {
                               ? "Processing..."
                               : processed
                               ? "Processed"
+                              : failed
+                              ? "Failed"
                               : "Ready to process"}
                           </span>
                         </div>
