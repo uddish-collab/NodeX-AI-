@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import "./App.css";
 import {
   analyzeText,
@@ -32,17 +39,31 @@ const buildGraphLayout = (nodes = []) => {
  * Returns Map(nodeId -> {x, y}) in percent, or null when the size is not known yet
  * (the caller then keeps the simple circular layout from buildGraphLayout).
  */
+// True while the viewport matches a CSS media query (updates when it changes).
+const useMediaQuery = (query) =>
+  useSyncExternalStore(
+    (notify) => {
+      const list = window.matchMedia(query);
+      list.addEventListener("change", notify);
+      return () => list.removeEventListener("change", notify);
+    },
+    () => window.matchMedia(query).matches,
+    () => false
+  );
+
 const CHIP_HEIGHT = 36; // rendered chips are ~34px tall
 
-// Close to the rendered width (CSS: min 96px, max 200px, 12px bold text).
-const chipWidth = (label = "") =>
-  Math.min(200, Math.max(96, label.length * 6.4 + 44));
+// Chip size estimates. "Compact" chips are used on narrow canvases (see .is-compact in the CSS).
+const chipBox = (label = "", compact = false) =>
+  compact
+    ? { w: Math.min(140, Math.max(68, label.length * 5.4 + 32)), h: 30 }
+    : { w: Math.min(200, Math.max(96, label.length * 6.4 + 44)), h: CHIP_HEIGHT };
 
-const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
+const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44, compact = false) => {
   if (!nodes.length || width < 40 || height < 40) return null;
 
   const size = new Map(
-    nodes.map((node) => [node.id, { w: chipWidth(node.label), h: CHIP_HEIGHT }])
+    nodes.map((node) => [node.id, chipBox(node.label, compact)])
   );
   const degree = new Map(nodes.map((node) => [node.id, 0]));
 
@@ -58,8 +79,8 @@ const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
   });
   const clusters = [...groups.values()];
 
-  // Prefer cells at least ~260px wide, so side-by-side clusters do not get cramped.
-  const maxCols = Math.max(1, Math.floor(width / 260));
+  // Prefer cells at least ~220px (compact) or ~260px wide, so side-by-side clusters do not get cramped.
+  const maxCols = Math.max(1, Math.floor(width / (compact ? 210 : 250)));
   const cols = Math.min(
     maxCols,
     Math.max(1, Math.ceil(Math.sqrt(clusters.length * (width / height))))
@@ -76,23 +97,129 @@ const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
     const [hub, ...rest] = [...cluster].sort(
       (a, b) => degree.get(b.id) - degree.get(a.id)
     );
-    const rx = Math.max(70, cellW / 2 - 100);
-    const ry = Math.max(60, cellH / 2 - 44);
 
     pos.set(hub.id, { x: cx, y: cy });
-    rest.forEach((node, i) => {
-      const angle = -Math.PI / 2 + (i / rest.length) * Math.PI * 2;
-      pos.set(node.id, {
-        x: cx + Math.cos(angle) * rx,
-        y: cy + Math.sin(angle) * ry,
+
+    if (!rest.length) return;
+
+    const isPortrait = cellH > cellW * 1.15;
+
+    if (isPortrait && rest.length > 6) {
+      // In portrait/narrow layouts, distribute nodes in columns flanking above and below the hub
+      const hubBox = size.get(hub.id);
+      const colW = (cellW - 16) / 2;
+
+      const topCount = Math.floor(rest.length / 2);
+      const bottomCount = rest.length - topCount;
+
+      const topH = Math.max(40, cy - hubBox.h / 2 - 18);
+      const bottomY = cy + hubBox.h / 2 + 18;
+      const bottomH = Math.max(40, cellH - bottomY - 12);
+
+      for (let i = 0; i < topCount; i++) {
+        const row = Math.floor(i / 2);
+        const totalRows = Math.ceil(topCount / 2);
+        const ny = 14 + ((row + 0.5) / totalRows) * topH;
+        const col = i % 2;
+        const nx = 8 + col * colW + colW / 2;
+        pos.set(rest[i].id, { x: nx, y: ny });
+      }
+
+      for (let i = 0; i < bottomCount; i++) {
+        const row = Math.floor(i / 2);
+        const totalRows = Math.ceil(bottomCount / 2);
+        const ny = bottomY + ((row + 0.5) / totalRows) * bottomH;
+        const col = i % 2;
+        const nx = 8 + col * colW + colW / 2;
+        pos.set(rest[topCount + i].id, { x: nx, y: ny });
+      }
+    } else if (rest.length <= 6) {
+      // Single ring for small clusters
+      const rx = Math.max(compact ? 45 : 65, cellW / 2 - (compact ? 70 : 95));
+      const ry = Math.max(compact ? 40 : 55, cellH / 2 - (compact ? 34 : 42));
+      rest.forEach((node, i) => {
+        const angle = -Math.PI / 2 + (i / rest.length) * Math.PI * 2;
+        pos.set(node.id, {
+          x: cx + Math.cos(angle) * rx,
+          y: cy + Math.sin(angle) * ry,
+        });
       });
-    });
+    } else if (rest.length <= 12) {
+      // Two concentric rings
+      const innerCount = Math.min(5, Math.ceil(rest.length * 0.38));
+      const outerCount = rest.length - innerCount;
+      const rxOuter = Math.max(compact ? 55 : 80, cellW / 2 - (compact ? 65 : 90));
+      const ryOuter = Math.max(compact ? 50 : 70, cellH / 2 - (compact ? 32 : 40));
+      const rxInner = rxOuter * 0.52;
+      const ryInner = ryOuter * 0.52;
+
+      for (let i = 0; i < innerCount; i++) {
+        const angle = -Math.PI / 2 + (i / innerCount) * Math.PI * 2;
+        pos.set(rest[i].id, {
+          x: cx + Math.cos(angle) * rxInner,
+          y: cy + Math.sin(angle) * ryInner,
+        });
+      }
+      for (let i = 0; i < outerCount; i++) {
+        const angle = -Math.PI / 2 + ((i + 0.5) / outerCount) * Math.PI * 2;
+        pos.set(rest[innerCount + i].id, {
+          x: cx + Math.cos(angle) * rxOuter,
+          y: cy + Math.sin(angle) * ryOuter,
+        });
+      }
+    } else {
+      // 3 rings for wide dense clusters (> 12 nodes)
+      const hubBox = size.get(hub.id);
+      const rxMax = Math.max(compact ? 60 : 100, cellW / 2 - (compact ? 60 : 85));
+      const ryMax = Math.max(compact ? 55 : 85, cellH / 2 - (compact ? 30 : 38));
+
+      // Calculate safe inner radii that clear the central hub box
+      const minInnerRx = hubBox.w / 2 + (compact ? 50 : 70);
+      const minInnerRy = hubBox.h / 2 + (compact ? 22 : 30);
+
+      const r1x = Math.min(rxMax * 0.55, Math.max(minInnerRx, rxMax * 0.44));
+      const r1y = Math.min(ryMax * 0.55, Math.max(minInnerRy, ryMax * 0.44));
+      const r2x = rxMax * 0.76;
+      const r2y = ryMax * 0.76;
+      const r3x = rxMax;
+      const r3y = ryMax;
+
+      const ring1Count = 6;
+      const ring2Count = Math.min(9, Math.ceil((rest.length - 6) * 0.5));
+      const ring3Count = rest.length - ring1Count - ring2Count;
+
+      for (let i = 0; i < ring1Count; i++) {
+        const angle = -Math.PI / 2 + (i / ring1Count) * Math.PI * 2;
+        pos.set(rest[i].id, {
+          x: cx + Math.cos(angle) * r1x,
+          y: cy + Math.sin(angle) * r1y,
+        });
+      }
+      for (let i = 0; i < ring2Count; i++) {
+        const angle = -Math.PI / 2 + ((i + 0.5) / ring2Count) * Math.PI * 2;
+        pos.set(rest[ring1Count + i].id, {
+          x: cx + Math.cos(angle) * r2x,
+          y: cy + Math.sin(angle) * r2y,
+        });
+      }
+      for (let i = 0; i < ring3Count; i++) {
+        const angle = -Math.PI / 2 + (i / ring3Count) * Math.PI * 2;
+        pos.set(rest[ring1Count + ring2Count + i].id, {
+          x: cx + Math.cos(angle) * r3x,
+          y: cy + Math.sin(angle) * r3y,
+        });
+      }
+    }
   });
 
   const ids = nodes.map((node) => node.id);
   const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
 
-  for (let pass = 0; pass < 120; pass += 1) {
+  // Separation passes with adaptive push
+  const margin = compact ? 8 : 12;
+  const maxPasses = 300;
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
     let moved = false;
 
     for (let a = 0; a < ids.length; a += 1) {
@@ -101,22 +228,43 @@ const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
         const pb = pos.get(ids[b]);
         const sa = size.get(ids[a]);
         const sb = size.get(ids[b]);
-        const dx = pb.x - pa.x;
-        const dy = pb.y - pa.y;
-        const overlapX = (sa.w + sb.w) / 2 + 10 - Math.abs(dx);
-        const overlapY = (sa.h + sb.h) / 2 + 10 - Math.abs(dy);
+
+        let dx = pb.x - pa.x;
+        let dy = pb.y - pa.y;
+
+        const targetDistX = (sa.w + sb.w) / 2 + margin;
+        const targetDistY = (sa.h + sb.h) / 2 + margin;
+
+        const overlapX = targetDistX - Math.abs(dx);
+        const overlapY = targetDistY - Math.abs(dy);
 
         if (overlapX > 0 && overlapY > 0) {
           moved = true;
 
-          if (overlapY < overlapX) {
+          if (Math.abs(dx) < 0.1 && Math.abs(dy) < 0.1) {
+            dx = (a % 2 === 0 ? 1 : -1) * 2;
+            dy = (b % 2 === 0 ? 1 : -1) * 2;
+          }
+
+          const penX = overlapX / targetDistX;
+          const penY = overlapY / targetDistY;
+
+          // Push along smaller normalized penetration axis with proportional blending
+          if (penY < penX * 0.75) {
             const push = ((dy >= 0 ? 1 : -1) * overlapY) / 2;
             pa.y -= push;
             pb.y += push;
-          } else {
+          } else if (penX < penY * 0.75) {
             const push = ((dx >= 0 ? 1 : -1) * overlapX) / 2;
             pa.x -= push;
             pb.x += push;
+          } else {
+            const pushX = (((dx >= 0 ? 1 : -1) * overlapX) / 2) * 0.65;
+            const pushY = (((dy >= 0 ? 1 : -1) * overlapY) / 2) * 0.65;
+            pa.x -= pushX;
+            pb.x += pushX;
+            pa.y -= pushY;
+            pb.y += pushY;
           }
         }
       }
@@ -127,7 +275,7 @@ const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
       const box = size.get(id);
 
       point.x = clamp(point.x, box.w / 2 + 8, width - box.w / 2 - 8);
-      point.y = clamp(point.y, box.h / 2 + 8, height - bottomReserve - box.h / 2 + 12);
+      point.y = clamp(point.y, box.h / 2 + 8, height - bottomReserve - box.h / 2 - 8);
     });
 
     if (!moved) break;
@@ -146,17 +294,20 @@ const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
  * stretch of line that is NOT hidden behind either chip. Returns null if that gap is too
  * small to hold the label (so labels never cover node names).
  */
-const labelSpot = (a, b, text, canvas) => {
+const labelSpot = (a, b, text, canvas, compact = false) => {
   const ax = (a.x / 100) * canvas.w;
   const ay = (a.y / 100) * canvas.h;
   const dx = (b.x / 100) * canvas.w - ax;
   const dy = (b.y / 100) * canvas.h - ay;
-  const wa = chipWidth(a.label);
-  const wb = chipWidth(b.label);
+  const boxA = chipBox(a.label, compact);
+  const boxB = chipBox(b.label, compact);
+  const wa = boxA.w;
+  const wb = boxB.w;
+  const chipH = boxA.h;
   const labelWidth = text.length * 5.6 + 20;
 
   const gapX = Math.abs(dx) - (wa + wb) / 2;
-  const gapY = Math.abs(dy) - CHIP_HEIGHT;
+  const gapY = Math.abs(dy) - chipH;
 
   if (gapX < labelWidth + 6 && gapY < 26) return null;
 
@@ -164,7 +315,7 @@ const labelSpot = (a, b, text, canvas) => {
   const inside = (w) =>
     Math.min(
       dx ? w / 2 / Math.abs(dx) : Infinity,
-      dy ? CHIP_HEIGHT / 2 / Math.abs(dy) : Infinity
+      dy ? chipH / 2 / Math.abs(dy) : Infinity
     );
   const start = inside(wa);
   const end = 1 - inside(wb);
@@ -397,6 +548,33 @@ function KnowledgeGraph({
   const [canvas, setCanvas] = useState(null);
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
 
+  // Narrow canvases get smaller chips; tall graphs get a taller canvas. The side-by-side map
+  // page has a fixed height, so only the dashboard preview and the stacked map grow.
+  const stacked = useMediaQuery("(max-width: 820px)");
+  const compact = canvasSize.w > 0 && canvasSize.w < 420;
+  const graphMinHeight =
+    canvasSize.w === 0
+      ? 360
+      : !full
+      ? Math.min(
+          460,
+          Math.max(
+            340,
+            Math.round(
+              (graph.nodes.length * (compact ? 5400 : 7200)) / canvasSize.w
+            ) + 70
+          )
+        )
+      : Math.min(
+          780,
+          Math.max(
+            360,
+            Math.round(
+              (graph.nodes.length * (compact ? 7200 : 9600)) / canvasSize.w
+            ) + 80
+          )
+        );
+
   // Measure once as soon as the canvas mounts; the observer below keeps it up to date.
   const attachCanvas = useCallback((node) => {
     setCanvas(node);
@@ -406,6 +584,20 @@ function KnowledgeGraph({
       setCanvasSize({ w: Math.round(box.width), h: Math.round(box.height) });
     }
   }, []);
+
+  // The canvas height can change after the first measurement (it follows the node count and the
+  // width), so measure again once the new height has been applied.
+  useLayoutEffect(() => {
+    if (!canvas) return;
+
+    const box = canvas.getBoundingClientRect();
+    const next = { w: Math.round(box.width), h: Math.round(box.height) };
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCanvasSize((current) =>
+      current.w === next.w && current.h === next.h ? current : next
+    );
+  }, [canvas, graphMinHeight, compact]);
 
   useEffect(() => {
     if (!canvas) return undefined;
@@ -440,13 +632,14 @@ function KnowledgeGraph({
       graph.edges,
       canvasSize.w,
       canvasSize.h,
-      28 + 16 * legendLines
+      28 + 16 * legendLines,
+      compact
     );
 
     return graph.nodes.map((node) =>
       spots?.get(node.id) ? { ...node, ...spots.get(node.id) } : node
     );
-  }, [graph.nodes, graph.edges, canvasSize, nodeTypes]);
+  }, [graph.nodes, graph.edges, canvasSize, nodeTypes, compact]);
 
   if (!graph.nodes.length) {
     return (
@@ -478,17 +671,11 @@ function KnowledgeGraph({
   return (
     <div
       ref={attachCanvas}
-      className={`data-graph ${full ? "data-graph-full" : ""}`}
-      // The small dashboard preview grows with the number of nodes so big graphs stay readable.
+      className={`data-graph ${full ? "data-graph-full" : ""} ${
+        compact ? "is-compact" : ""
+      }`}
       style={
-        full
-          ? undefined
-          : {
-              minHeight: Math.min(
-                720,
-                Math.max(360, 200 + graph.nodes.length * 26)
-              ),
-            }
+        !full || stacked ? { minHeight: `${graphMinHeight}px` } : undefined
       }
     >
       <svg
@@ -533,7 +720,7 @@ function KnowledgeGraph({
           if (!source || !target || !canvasSize.w) return null;
 
           const text = edge.relationship.replace(/_/g, " ");
-          const spot = labelSpot(source, target, text, canvasSize);
+          const spot = labelSpot(source, target, text, canvasSize, compact);
 
           if (!spot) return null;
 
@@ -1544,7 +1731,7 @@ function App() {
           <span>NodeX</span>
         </div>
 
-        <nav>
+        <nav aria-label="Main navigation">
           {[
             "Dashboard",
             "Knowledge Map",
@@ -1552,6 +1739,7 @@ function App() {
           ].map((page) => (
             <button
               key={page}
+              aria-current={activePage === page ? "page" : undefined}
               className={`nav-item ${
                 activePage === page ? "active" : ""
               }`}
@@ -1564,6 +1752,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <button
+            aria-current={activePage === "Settings" ? "page" : undefined}
             className={`nav-item ${
               activePage === "Settings" ? "active" : ""
             }`}
@@ -2175,6 +2364,18 @@ function App() {
                       }`}
                       key={document.id}
                       data-status={document.status}
+                      tabIndex={0}
+                      role="button"
+                      aria-pressed={isActive}
+                      onKeyDown={(event) => {
+                        if (
+                          event.target === event.currentTarget &&
+                          (event.key === "Enter" || event.key === " ")
+                        ) {
+                          event.preventDefault();
+                          selectDocument(document.id);
+                        }
+                      }}
                       onClick={() =>
                         selectDocument(document.id)
                       }
@@ -2425,9 +2626,9 @@ function App() {
                   <span>i</span>
 
                   <p>
-                    Backend integration will replace this
-                    demo processing with real document
-                    analysis later.
+                    Uploaded files are analyzed by the
+                    NodeX AI backend. Turn this off to add
+                    files without analyzing them.
                   </p>
                 </div>
               </div>
