@@ -90,6 +90,18 @@ def clear_all(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM sources")
 
 
+def delete_source(conn: sqlite3.Connection, source_id: int) -> bool:
+    """Delete one source with its relationships and entities (children first).
+    Returns False when the source does not exist. Other sources are untouched."""
+    with conn:
+        if conn.execute("SELECT 1 FROM sources WHERE id = ?", (source_id,)).fetchone() is None:
+            return False
+        conn.execute("DELETE FROM relationships WHERE source_id = ?", (source_id,))
+        conn.execute("DELETE FROM entities WHERE source_id = ?", (source_id,))
+        conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+    return True
+
+
 def list_sources(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """All sources, oldest first. Deliberately leaves out the stored content."""
     return conn.execute(

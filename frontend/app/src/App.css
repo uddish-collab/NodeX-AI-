@@ -3192,3 +3192,7 @@ nav {
   .main-content { padding: 12px; }
   .panel, .page-placeholder { padding: 14px; border-radius: 14px; }
 }
+
+/* Delete a saved document */
+.delete-source-button:disabled { cursor: progress; opacity: 0.3; }
+.delete-source-button:hover:not(:disabled) { color: #ff8a8a; }

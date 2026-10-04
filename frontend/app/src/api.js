@@ -87,3 +87,10 @@ export const getNodeDetails = async (nodeId) =>
 
 export const getSources = async () =>
   request("/sources", undefined, "Could not load saved documents");
+
+export const deleteSource = async (sourceId) =>
+  request(
+    `/sources/${encodeURIComponent(sourceId)}`,
+    { method: "DELETE" },
+    "Could not delete document"
+  );

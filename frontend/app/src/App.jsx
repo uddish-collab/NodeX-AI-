@@ -3,12 +3,14 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import "./App.css";
 import {
   analyzeText,
+  deleteSource,
   getGraph,
   getNodeDetails,
   getSources,
@@ -935,6 +937,11 @@ function App() {
 
   // Saved sources from the backend (GET /sources).
   const [savedSources, setSavedSources] = useState([]);
+  // Source id currently being deleted (blocks duplicate clicks).
+  const [deletingSourceId, setDeletingSourceId] = useState(null);
+  // Result of the last delete, shown on the Documents page: { text, error } or null.
+  const [documentsMessage, setDocumentsMessage] = useState(null);
+  const deleteInFlight = useRef(false); // synchronous guard: state is not updated between two quick clicks
   const [sourcesState, setSourcesState] = useState({
     loading: true,
     error: null,
@@ -1478,6 +1485,49 @@ function App() {
 
     setSelectedNode(null);
     setSearchMessage("");
+  };
+
+  // Delete a saved document and its graph data from the backend (DELETE /sources/{id}).
+  const removeSavedDocument = async (document) => {
+    if (deleteInFlight.current || !document.sourceId) return;
+    deleteInFlight.current = true;
+
+    if (!window.confirm("Delete this document and its knowledge graph data?")) {
+      deleteInFlight.current = false;
+      return;
+    }
+
+    setDeletingSourceId(document.sourceId);
+
+    try {
+      await deleteSource(document.sourceId);
+    } catch (error) {
+      setDocumentsMessage({
+        text: `Could not delete ${document.file.name}: ${error.message}`,
+        error: true,
+      });
+      setDeletingSourceId(null);
+      deleteInFlight.current = false;
+      refreshSources(); // the list may be stale (e.g. already deleted elsewhere)
+      return;
+    }
+
+    setDocuments((current) =>
+      current.filter((item) => item.sourceId !== document.sourceId)
+    );
+    if (activeDocumentId === document.id) setActiveDocumentId(null);
+    if (uploadDocumentId === document.id) setUploadDocumentId(null);
+    setSelectedNode(null);
+
+    // Reload the saved list and the graph so the counts everywhere are current.
+    await refreshSources();
+
+    setDocumentsMessage({
+      text: `Deleted ${document.file.name} and its knowledge graph data.`,
+      error: false,
+    });
+    setDeletingSourceId(null);
+    deleteInFlight.current = false;
   };
 
   const deleteDocument = (documentId) => {
@@ -2288,6 +2338,18 @@ function App() {
               </button>
             </div>
 
+            {documentsMessage && (
+              <div
+                role="status"
+                className={`search-message search-feedback ${
+                  documentsMessage.error ? "search-feedback-error" : ""
+                }`}
+              >
+                <span>{documentsMessage.error ? "✕" : "✓"}</span>
+                {documentsMessage.text}
+              </div>
+            )}
+
             {allDocuments.length === 0 && sourcesState.loading ? (
               <div className="empty-page">
                 <span>□</span>
@@ -2442,7 +2504,38 @@ function App() {
                           </button>
                         )}
 
-                        {!document.saved && (
+                        {document.sourceId && (
+                          <button
+                            className="remove-file delete-source-button"
+                            disabled={deletingSourceId !== null}
+                            title="Delete document and its graph data"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              removeSavedDocument(document);
+                            }}
+                            aria-label={`Delete ${document.file.name} and its knowledge graph data`}
+                          >
+                            {deletingSourceId === document.sourceId ? (
+                              "…"
+                            ) : (
+                              <svg
+                                width="16"
+                                height="16"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6" />
+                              </svg>
+                            )}
+                          </button>
+                        )}
+
+                        {!document.saved && !document.sourceId && (
                           <button
                             className="remove-file"
                             onClick={(event) => {
