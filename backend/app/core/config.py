@@ -19,6 +19,9 @@ class Settings:
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or None
+    # Backup provider: used automatically when Gemini fails (see ai_service.py).
+    groq_model: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    groq_api_key: str | None = os.getenv("GROQ_API_KEY") or None
     # SQLite file; the data/ folder is created automatically.
     db_path: str = os.getenv(
         "DB_PATH", str(Path(__file__).resolve().parents[2] / "data" / "nodex.db")

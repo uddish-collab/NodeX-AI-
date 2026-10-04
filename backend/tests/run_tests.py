@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 tmp = tempfile.mkdtemp()
 os.environ["DB_PATH"] = os.path.join(tmp, "test.db")  # never touch the real database
+os.environ["GROQ_API_KEY"] = ""  # keep the real .env's Groq key (backup provider) out of these tests
 for k in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
     os.environ.pop(k, None)
 os.environ["AI_PROVIDER"] = "openai"

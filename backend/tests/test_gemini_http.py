@@ -12,6 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
+os.environ["GROQ_API_KEY"] = ""  # keep the real .env's Groq key (backup provider) out of these tests
 os.environ["AI_PROVIDER"] = "gemini"
 os.environ["GEMINI_API_KEY"] = "test-key-123"
 os.environ["GEMINI_MODEL"] = "test-model"

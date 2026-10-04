@@ -1,6 +1,7 @@
 """Provider-neutral AI analysis. Pick the provider with AI_PROVIDER in .env."""
 import base64
 import json
+import logging
 import random
 import time
 import urllib.error
@@ -21,6 +22,8 @@ from app.services.prompts import (
     SYSTEM_PROMPT,
     build_user_prompt,
 )
+
+logger = logging.getLogger("nodex.ai")
 
 
 def _call_openai(text: str) -> str:
@@ -130,20 +133,125 @@ def gemini_configured() -> bool:
     return bool(settings.gemini_api_key)
 
 
+# ---------------------------------------------------------------------------
+# Groq: backup provider (OpenAI-compatible chat completions API).
+# One attempt only: Gemini already retries, and a Groq failure is the end of the line.
+# ---------------------------------------------------------------------------
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+def groq_configured() -> bool:
+    return bool(settings.groq_api_key)
+
+
+def _redact(text: str) -> str:
+    """Remove any configured API key from text before it is logged or put in an error."""
+    for secret in (settings.gemini_api_key, settings.groq_api_key, settings.openai_api_key):
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
+def _groq_error_message(e: urllib.error.HTTPError) -> str:
+    try:
+        err = json.loads(e.read().decode()).get("error", {}) or {}
+        return f"{err.get('type') or e.reason}: {err.get('message', '')}".strip()
+    except Exception:
+        return str(e.reason)
+
+
+def _groq_generate(messages: list[dict], timeout: int = 60, json_mode: bool = False) -> str:
+    """POST a chat completion to Groq and return the reply text. The key goes in the
+    Authorization header only (never the URL)."""
+    body: dict = {"model": settings.groq_model, "messages": messages, "temperature": 0}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    request = urllib.request.Request(
+        GROQ_URL,
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.groq_api_key or ''}",
+            "User-Agent": "nodex-backend/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise AIProviderError(_redact(f"Groq request failed: HTTP {e.code} {_groq_error_message(e)}"))
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise AIProviderError(_redact(f"Groq request failed: could not reach the API ({e})"))
+    except ValueError:
+        raise AIProviderError("Groq request failed: response was not valid JSON.")
+    choices = data.get("choices") or [{}]
+    return (choices[0].get("message") or {}).get("content") or ""
+
+
+def _call_groq(text: str) -> str:
+    return _groq_generate(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_user_prompt(text)},
+        ],
+        json_mode=True,
+    )
+
+
+def _groq_extract_text_from_images(images: list[tuple[bytes, str]]) -> str:
+    content: list[dict] = [{"type": "text", "text": IMAGE_EXTRACTION_PROMPT}]
+    for data, mime in images:
+        url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    return _groq_generate([{"role": "user", "content": content}], timeout=90)
+
+
+# Shown to the frontend when Gemini AND Groq both fail: no provider names, codes or keys.
+BOTH_FAILED_ANALYSIS = (
+    "AI analysis failed: both the primary and the backup AI provider were unable "
+    "to complete the request. Please try again later."
+)
+BOTH_FAILED_VISION = (
+    "Reading the file failed: both the primary and the backup AI provider were unable "
+    "to read it. Please try again later."
+)
+
+
+def _gemini_extract_text_from_images(images: list[tuple[bytes, str]]) -> str:
+    parts: list[dict] = [{"text": IMAGE_EXTRACTION_PROMPT}]
+    for data, mime in images:
+        parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}})
+    return _gemini_generate(
+        {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0}},
+        timeout=90,
+    )
+
+
 def extract_text_from_images(images: list[tuple[bytes, str]]) -> str:
     """Send one or more (bytes, mime_type) images to Gemini vision and return
-    the text/description it reads. Returns "" if nothing was found."""
+    the text/description it reads. Returns "" if nothing was found.
+    If Gemini fails and Groq is configured, Groq reads the same images instead."""
     if not gemini_configured():
         raise AINotConfiguredError(
             "Image reading is not configured: set GEMINI_API_KEY in backend/.env."
         )
-    parts: list[dict] = [{"text": IMAGE_EXTRACTION_PROMPT}]
-    for data, mime in images:
-        parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}})
-    reply = _gemini_generate(
-        {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0}},
-        timeout=90,
-    ).strip()
+    try:
+        reply = _gemini_extract_text_from_images(images)
+        # HTTP 200 with an empty reply (e.g. the answer was blocked) is a failed read, not
+        # "no text": a genuine empty page is reported with the explicit NO_TEXT_FOUND marker.
+        if not reply.strip() and groq_configured():
+            raise AIProviderError("Gemini returned an empty response.")
+    except AIProviderError as primary_error:
+        if not groq_configured():
+            raise
+        logger.warning("Gemini image reading failed (%s); trying Groq.", _redact(primary_error.message))
+        try:
+            reply = _groq_extract_text_from_images(images)
+        except AIProviderError as backup_error:
+            logger.error("Groq image reading also failed (%s).", _redact(backup_error.message))
+            raise AIProviderError(BOTH_FAILED_VISION) from None
+    reply = reply.strip()
     return "" if reply == NO_TEXT_MARKER else reply
 
 
@@ -170,6 +278,17 @@ def _check_references(result: AnalysisResult) -> None:
             )
 
 
+def _parse_result(raw: str) -> AnalysisResult:
+    try:
+        result = AnalysisResult.model_validate_json(raw)
+    except ValidationError:
+        raise AIMalformedResponseError(
+            "The AI response did not match the expected format. Please try again."
+        )
+    _check_references(result)
+    return result
+
+
 def analyze_text(text: str) -> AnalysisResult:
     provider = _PROVIDERS.get(settings.ai_provider)
     if provider is None:
@@ -183,12 +302,16 @@ def analyze_text(text: str) -> AnalysisResult:
             f"(AI_PROVIDER={settings.ai_provider})."
         )
 
-    raw = call(text)
     try:
-        result = AnalysisResult.model_validate_json(raw)
-    except ValidationError:
-        raise AIMalformedResponseError(
-            "The AI response did not match the expected format. Please try again."
-        )
-    _check_references(result)
-    return result
+        return _parse_result(call(text))
+    except (AIProviderError, AIMalformedResponseError) as primary_error:
+        # Failover: Gemini is primary; Groq only runs after Gemini failed
+        # (unavailable, rate limit/quota, timeout, network, or unusable output).
+        if settings.ai_provider != "gemini" or not groq_configured():
+            raise
+        logger.warning("Gemini analysis failed (%s); trying Groq.", _redact(primary_error.message))
+        try:
+            return _parse_result(_call_groq(text))
+        except (AIProviderError, AIMalformedResponseError) as backup_error:
+            logger.error("Groq analysis also failed (%s).", _redact(backup_error.message))
+            raise AIProviderError(BOTH_FAILED_ANALYSIS) from None

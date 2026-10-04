@@ -45,6 +45,30 @@ defaults to `gpt-4o-mini`).
 scanned-PDF OCR always use Gemini, so they need `GEMINI_API_KEY` even when
 `AI_PROVIDER=openai`.
 
+### Backup provider: Groq (automatic failover)
+
+Gemini stays the primary provider. If you also set a Groq key, NodeX falls back to Groq
+automatically:
+
+```
+GROQ_API_KEY=<your key>         # leave empty to disable the backup
+GROQ_MODEL=qwen/qwen3.8-27b     # default
+```
+
+- **Text analysis** (`AI_PROVIDER=gemini`): if Gemini fails (unavailable, rate limit or
+  quota, timeout, network error, or unusable/malformed output), the same request is sent
+  to Groq. Groq is **not** called when Gemini succeeds. Gemini keeps its own retries
+  first; Groq gets a single attempt.
+- **Image and scanned-PDF reading:** if Gemini vision fails, Groq reads the same images.
+- If **both** fail, `/analyze` and `/upload` return one generic `502` ("both the primary
+  and the backup AI provider were unable..."). The frontend never sees provider names,
+  error details or keys; the details are logged on the server only.
+- With no Groq key, behavior is unchanged: Gemini's own error is returned.
+- Failover only applies to `AI_PROVIDER=gemini`; the OpenAI provider is unchanged. It does
+  not take over when Gemini is simply not configured (that stays a `503` config error).
+- Groq's free tier has a tokens-per-minute limit (8,000 on our key), so very large
+  documents or rapid uploads may fail on the backup path.
+
 Other optional settings: `MAX_UPLOAD_MB` (default 10), `MAX_TEXT_CHARS` (default 20000),
 `DB_PATH`. Restart the server after editing `.env`. Without a key for the chosen
 provider, `/analyze` returns a clear `503` error.
@@ -162,11 +186,13 @@ Response:
 ```
 
 Errors: `400` blank text, `422` missing text, over 20000 chars or an invalid `source_type`,
-`502` AI provider failed or returned malformed output, `503` AI not configured.
+`502` AI provider failed or returned malformed output (with the Groq backup configured, a
+generic "both providers failed" message), `503` AI not configured.
 On any error **nothing is saved**.
 
 Gemini calls retry up to 4 times (exponential backoff) on `5xx` and short-term `429`
-rate limits. A daily-quota `429` is **not** retried and fails immediately with a `502`.
+rate limits. A daily-quota `429` is **not** retried and fails immediately; in both cases the
+request then goes to the Groq backup if one is configured, otherwise it ends in a `502`.
 
 ### GET /graph
 
@@ -271,7 +297,7 @@ The code uses Python's built-in `sqlite3` (no ORM, no extra dependency); all SQL
 
 ## Tests
 
-There are six standalone scripts (no pytest needed). Run each from `backend/`:
+There are seven standalone scripts (no pytest needed). Run each from `backend/`:
 
 ```powershell
 python tests/run_tests.py          # analyze, graph, node details, filtering, failure cases
@@ -280,6 +306,7 @@ python tests/test_gemini_retry.py  # retry/backoff and quota-exhausted 429
 python tests/test_uploads.py       # PDF, DOCX, TXT/MD, PNG/JPG, validation errors
 python tests/test_reset.py         # DELETE /graph
 python tests/test_sources.py       # GET /sources
+python tests/test_groq_failover.py # Gemini -> Groq automatic failover (text and vision)
 ```
 
 They use a temporary database and mocked/canned AI replies (defined only inside the tests),
@@ -321,6 +348,7 @@ tests/                           standalone test scripts (see Tests)
 - The only delete is `DELETE /graph` (wipes everything); there is no per-source delete or update.
   No auth, and SQLite is for a single-server MVP only.
 - Gemini's free tier has a daily request limit (we saw 20/day for `gemini-3.7-flash`). When it is
-  exhausted, `/analyze` and image/OCR reading fail with a `502` carrying the provider's message.
+  exhausted, `/analyze` and image/OCR reading move to the Groq backup if configured, otherwise
+  they fail with a `502` carrying the provider's message.
   Relationship quality depends on the model.
 - CORS allows all origins (local development).
