@@ -31,7 +31,8 @@ from app.main import app  # noqa: E402
 from app.services import ai_service  # noqa: E402
 from app.services.prompts import NO_TEXT_MARKER, SYSTEM_PROMPT  # noqa: E402
 
-ai_service.time.sleep = lambda s: None  # Gemini's retries must not really wait
+SLEEPS: list[float] = []
+ai_service.time.sleep = SLEEPS.append  # Gemini's retries must not really wait (delays are recorded)
 URLOPEN = "app.services.ai_service.urllib.request.urlopen"
 ALL_KEYS = (GEMINI_KEY, GROQ_KEY, OPENAI_KEY)
 passed = 0
@@ -93,12 +94,14 @@ class Router:
     def __init__(self, gemini, groq):
         self.handlers = {"gemini": gemini, "groq": groq}
         self.calls = {"gemini": [], "groq": []}
+        self.timeouts = {"gemini": [], "groq": []}
 
     def __call__(self, request, timeout=None):
         url = request.full_url
         provider = "gemini" if "googleapis.com" in url else "groq" if "api.groq.com" in url else None
         assert provider, f"unexpected URL: {url}"
         self.calls[provider].append(request)
+        self.timeouts[provider].append(timeout)
         h = self.handlers[provider]
         result = h() if callable(h) else h  # handlers are factories so each call gets a fresh response/error
         if isinstance(result, BaseException):
@@ -170,7 +173,7 @@ with TestClient(app) as c:
 
     r, rt = run(c, G503, lambda: groq_ok(GOOD_JSON))
     check("Gemini 503 -> Groq called once and succeeds", r.status_code == 200 and len(rt.calls["groq"]) == 1)
-    check("Gemini 503: Gemini's own retries kept (1 + 4), none added", len(rt.calls["gemini"]) == 5)
+    check("Gemini 503 with Groq configured: 2 Gemini attempts (1 retry), then Groq", len(rt.calls["gemini"]) == 2)
     body = r.json()
     check("Groq result keeps the frontend contract", set(body) == {"nodes", "edges", "source_summary", "source_id"}
           and body["nodes"][0]["source_id"] == body["source_id"] and body["edges"][0]["source"] in {n["id"] for n in body["nodes"]})
@@ -347,5 +350,95 @@ with TestClient(app) as c:
     # text analysis behavior is unchanged: an empty Gemini reply there already fails over
     r, rt = run(c, lambda: gemini_ok(""), lambda: groq_ok(GOOD_JSON))
     check("text analysis (unchanged): empty Gemini reply -> Groq succeeds", r.status_code == 200 and len(rt.calls["groq"]) == 1)
+
+    # =====================================================================
+    # Retry / timeout budget
+    #   Groq configured     : Gemini 1 retry (2 attempts); timeouts 40 s text / 60 s vision
+    #   Groq NOT configured : Gemini 4 retries (5 attempts); timeouts 60 s text / 90 s vision
+    # =====================================================================
+    PER_MINUTE = [{"@type": "QuotaFailure", "violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+                  {"@type": "RetryInfo", "retryDelay": "2s"}]
+    G429_SHORT = lambda: gemini_http_error(429, "RESOURCE_EXHAUSTED", "slow down", PER_MINUTE)  # noqa: E731
+    G429_DAILY = lambda: gemini_http_error(429, "RESOURCE_EXHAUSTED", "quota", DAILY_QUOTA)  # noqa: E731
+
+    def then(*steps):
+        """A handler that returns the given responses/errors one per call (a stateful Gemini)."""
+        queue = list(steps)
+        return lambda: queue.pop(0)()
+
+    # ---- Groq configured: text analysis ----
+    SLEEPS.clear()
+    r, rt = run(c, G503, lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini 503 -> exactly 2 Gemini attempts, then Groq", r.status_code == 200 and len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 1)
+    check("[backup] Gemini 503 -> a single 1-1.5 s backoff between the 2 attempts", len(SLEEPS) == 1 and 1.0 <= SLEEPS[0] < 1.5)
+    check("[backup] text timeouts: Gemini 40 s on every attempt, Groq unchanged at 60 s", rt.timeouts["gemini"] == [40, 40] and rt.timeouts["groq"] == [60])
+
+    SLEEPS.clear()
+    r, rt = run(c, G429_SHORT, lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini transient 429 -> exactly 2 Gemini attempts, then Groq", r.status_code == 200 and len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 1 and len(SLEEPS) == 1)
+
+    SLEEPS.clear()
+    r, rt = run(c, G429_DAILY, lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini daily-quota 429 -> 1 Gemini attempt (no retry, no sleep), then Groq",
+          r.status_code == 200 and len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1 and SLEEPS == [])
+
+    SLEEPS.clear()
+    r, rt = run(c, lambda: TimeoutError(), lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini timeout -> 1 attempt made with the 40 s timeout, not retried, then Groq",
+          r.status_code == 200 and rt.timeouts["gemini"] == [40] and len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1 and SLEEPS == [])
+    r, rt = run(c, lambda: urllib.error.URLError("refused"), lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini network failure -> 1 attempt, not retried, then Groq", len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1)
+    r, rt = run(c, lambda: gemini_ok("not json"), lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini malformed output -> 1 attempt, then Groq", len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1)
+
+    # the point of keeping one retry: a brief blip is absorbed WITHOUT touching Groq
+    r, rt = run(c, then(G503, lambda: gemini_ok(GOOD_JSON)), lambda: groq_ok(GOOD_JSON))
+    check("[backup] one transient 503 then success -> 2 Gemini attempts, Groq is NOT called", r.status_code == 200 and len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 0)
+    r, rt = run(c, then(G429_SHORT, lambda: gemini_ok(GOOD_JSON)), lambda: groq_ok(GOOD_JSON))
+    check("[backup] one transient 429 then success -> Groq is NOT called", r.status_code == 200 and len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 0)
+
+    r, rt = run(c, lambda: gemini_ok(GOOD_JSON), lambda: groq_ok(GOOD_JSON))
+    check("[backup] Gemini success -> 1 attempt with the 40 s timeout, Groq never called",
+          r.status_code == 200 and rt.timeouts["gemini"] == [40] and len(rt.calls["groq"]) == 0)
+
+    r, rt = run(c, G503, lambda: groq_http_error(500))
+    check("[backup] Groq is attempted exactly once even when it fails (no Groq retries)", r.status_code == 502 and len(rt.calls["groq"]) == 1)
+
+    # ---- Groq configured: vision / OCR ----
+    SLEEPS.clear()
+    r, rt = run(c, G503, lambda: groq_ok("Groq read it"), "/upload", **upload_png)
+    check("[backup] vision: Gemini 503 -> exactly 2 Gemini attempts, then Groq", r.status_code == 200 and r.json()["text"] == "Groq read it" and len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 1 and len(SLEEPS) == 1)
+    check("[backup] vision timeouts: Gemini 60 s on every attempt, Groq unchanged at 90 s", rt.timeouts["gemini"] == [60, 60] and rt.timeouts["groq"] == [90])
+    r, rt = run(c, G429_SHORT, lambda: groq_ok("Groq read it"), "/upload", **upload_png)
+    check("[backup] vision: Gemini transient 429 -> 2 attempts, then Groq", len(rt.calls["gemini"]) == 2 and len(rt.calls["groq"]) == 1)
+    r, rt = run(c, G429_DAILY, lambda: groq_ok("Groq read it"), "/upload", **upload_png)
+    check("[backup] vision: Gemini daily-quota 429 -> 1 attempt, then Groq", len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1)
+    r, rt = run(c, lambda: TimeoutError(), lambda: groq_ok("Groq read it"), "/upload", **upload_png)
+    check("[backup] vision: Gemini timeout -> 1 attempt with the 60 s timeout, then Groq", rt.timeouts["gemini"] == [60] and len(rt.calls["gemini"]) == 1 and len(rt.calls["groq"]) == 1)
+    r, rt = run(c, then(G503, lambda: gemini_ok("Gemini read it")), lambda: groq_ok("nope"), "/upload", **upload_png)
+    check("[backup] vision: one transient 503 then success -> Groq is NOT called", r.json()["text"] == "Gemini read it" and len(rt.calls["groq"]) == 0)
+    r, rt = run(c, lambda: gemini_ok("Gemini read it"), lambda: groq_ok("nope"), "/upload", **upload_png)
+    check("[backup] vision: Gemini success -> 1 attempt with the 60 s timeout, Groq never called", rt.timeouts["gemini"] == [60] and len(rt.calls["groq"]) == 0)
+
+    # ---- Groq NOT configured: the previous Gemini behavior is preserved ----
+    with setting(groq_api_key=None):
+        SLEEPS.clear()
+        r, rt = run(c, G503, lambda: groq_ok(GOOD_JSON))
+        check("[no backup] Gemini 503 -> 5 attempts (1 + 4 retries), Groq never called", r.status_code == 502 and len(rt.calls["gemini"]) == 5 and len(rt.calls["groq"]) == 0)
+        check("[no backup] original 1/2/4/8 s backoff schedule kept", len(SLEEPS) == 4 and all(b <= x < b + 0.5 for x, b in zip(SLEEPS, [1, 2, 4, 8])))
+        check("[no backup] original 60 s text timeout kept on every attempt", rt.timeouts["gemini"] == [60] * 5)
+        check("[no backup] original Gemini error + retry count reported", r.json()["detail"].startswith("Gemini request failed") and "after 4 retries" in r.json()["detail"])
+
+        r, rt = run(c, G429_SHORT, lambda: groq_ok(GOOD_JSON))
+        check("[no backup] Gemini transient 429 -> 5 attempts", len(rt.calls["gemini"]) == 5)
+        r, rt = run(c, G429_DAILY, lambda: groq_ok(GOOD_JSON))
+        check("[no backup] Gemini daily-quota 429 -> 1 attempt", len(rt.calls["gemini"]) == 1)
+        r, rt = run(c, lambda: TimeoutError(), lambda: groq_ok(GOOD_JSON))
+        check("[no backup] Gemini timeout -> 1 attempt, 60 s timeout", len(rt.calls["gemini"]) == 1 and rt.timeouts["gemini"] == [60])
+
+        r, rt = run(c, G503, lambda: groq_ok("x"), "/upload", **upload_png)
+        check("[no backup] vision: Gemini 503 -> 5 attempts, original 90 s timeout on every attempt", len(rt.calls["gemini"]) == 5 and rt.timeouts["gemini"] == [90] * 5 and len(rt.calls["groq"]) == 0)
+        r, rt = run(c, lambda: TimeoutError(), lambda: groq_ok("x"), "/upload", **upload_png)
+        check("[no backup] vision: Gemini timeout -> 1 attempt, 90 s timeout", len(rt.calls["gemini"]) == 1 and rt.timeouts["gemini"] == [90])
 
 print(f"\nAll {passed} checks passed")

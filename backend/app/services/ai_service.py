@@ -46,8 +46,12 @@ def _call_openai(text: str) -> str:
 
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-GEMINI_MAX_RETRIES = 4
+GEMINI_MAX_RETRIES = 4  # no Groq backup: retrying is the only way to recover
+GEMINI_MAX_RETRIES_WITH_BACKUP = 1  # Groq backup configured: one quick retry, then fail over
 GEMINI_BACKOFF_BASE = 1.0  # seconds
+# Per-attempt request timeouts (seconds). Shorter when a Groq backup can take over sooner.
+GEMINI_TEXT_TIMEOUT, GEMINI_VISION_TIMEOUT = 60, 90
+GEMINI_TEXT_TIMEOUT_WITH_BACKUP, GEMINI_VISION_TIMEOUT_WITH_BACKUP = 40, 60
 GEMINI_MAX_RETRY_DELAY = 60  # a 429 asking us to wait longer than this is not worth retrying
 
 
@@ -86,24 +90,26 @@ def _gemini_generate(payload: dict, timeout: int = 60) -> str:
     Plain REST (standard library only). The key goes in a header, never in
     the URL, so it cannot leak into error messages.
 
-    Transient provider errors (5xx and short-term 429 rate limits) are retried up to GEMINI_MAX_RETRIES
-    times with exponential backoff plus a little jitter. Other errors, including
-    quota-exhausted 429s, fail at once."""
+    Transient provider errors (5xx and short-term 429 rate limits) are retried with exponential
+    backoff plus a little jitter: up to GEMINI_MAX_RETRIES times, or just
+    GEMINI_MAX_RETRIES_WITH_BACKUP time when a Groq backup is configured (fail over sooner).
+    Other errors, including quota-exhausted 429s, timeouts and network failures, fail at once."""
     request = urllib.request.Request(
         GEMINI_URL.format(model=settings.gemini_model),
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key or ""},
         method="POST",
     )
+    max_retries = GEMINI_MAX_RETRIES_WITH_BACKUP if groq_configured() else GEMINI_MAX_RETRIES
     body = None
-    for attempt in range(GEMINI_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as resp:
                 body = json.loads(resp.read().decode())
             break
         except urllib.error.HTTPError as e:
             err = _read_error(e)  # the body can only be read once
-            if _is_transient(e.code, err) and attempt < GEMINI_MAX_RETRIES:
+            if _is_transient(e.code, err) and attempt < max_retries:
                 # 1s, 2s, 4s, 8s (+ up to 0.5s jitter)
                 time.sleep(GEMINI_BACKOFF_BASE * 2**attempt + random.uniform(0, 0.5))
                 continue
@@ -120,12 +126,19 @@ def _gemini_generate(payload: dict, timeout: int = 60) -> str:
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
+def _gemini_timeouts() -> tuple[int, int]:
+    """(text, vision) request timeouts: shorter when a Groq backup is configured."""
+    if groq_configured():
+        return GEMINI_TEXT_TIMEOUT_WITH_BACKUP, GEMINI_VISION_TIMEOUT_WITH_BACKUP
+    return GEMINI_TEXT_TIMEOUT, GEMINI_VISION_TIMEOUT
+
+
 def _call_gemini(text: str) -> str:
     return _gemini_generate({
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": [{"text": build_user_prompt(text)}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
-    })
+    }, timeout=_gemini_timeouts()[0])
 
 
 def gemini_configured() -> bool:
@@ -224,7 +237,7 @@ def _gemini_extract_text_from_images(images: list[tuple[bytes, str]]) -> str:
         parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}})
     return _gemini_generate(
         {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0}},
-        timeout=90,
+        timeout=_gemini_timeouts()[1],
     )
 
 

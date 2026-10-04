@@ -57,8 +57,8 @@ GROQ_MODEL=qwen/qwen3.8-27b     # default
 
 - **Text analysis** (`AI_PROVIDER=gemini`): if Gemini fails (unavailable, rate limit or
   quota, timeout, network error, or unusable/malformed output), the same request is sent
-  to Groq. Groq is **not** called when Gemini succeeds. Gemini keeps its own retries
-  first; Groq gets a single attempt.
+  to Groq. Groq is **not** called when Gemini succeeds. Gemini gets a short retry budget
+  first (see "Retries and timeouts" below); Groq gets a single attempt.
 - **Image and scanned-PDF reading:** if Gemini vision fails, Groq reads the same images.
 - If **both** fail, `/analyze` and `/upload` return one generic `502` ("both the primary
   and the backup AI provider were unable..."). The frontend never sees provider names,
@@ -190,9 +190,22 @@ Errors: `400` blank text, `422` missing text, over 20000 chars or an invalid `so
 generic "both providers failed" message), `503` AI not configured.
 On any error **nothing is saved**.
 
-Gemini calls retry up to 4 times (exponential backoff) on `5xx` and short-term `429`
-rate limits. A daily-quota `429` is **not** retried and fails immediately; in both cases the
-request then goes to the Groq backup if one is configured, otherwise it ends in a `502`.
+#### Retries and timeouts (Gemini)
+
+Gemini retries (exponential backoff with a little jitter) only on `5xx` and short-term `429`
+rate limits. A daily-quota `429`, a timeout, a network failure and unusable output are **not**
+retried. The budget depends on whether the Groq backup is configured, so a Gemini outage
+reaches Groq quickly instead of waiting through long retries:
+
+| | Groq backup configured | No Groq backup |
+|---|---|---|
+| Retries on `5xx` / short-term `429` | **1** (2 attempts, ~1-1.5 s apart) | 4 (5 attempts: 1, 2, 4, 8 s apart) |
+| Gemini timeout per attempt, text analysis | **40 s** | 60 s |
+| Gemini timeout per attempt, image/OCR | **60 s** | 90 s |
+
+If Gemini still fails, the request goes to the Groq backup (when configured), otherwise it
+ends in a `502`. Typical Gemini overload (`503` returned in about 5 s) now reaches Groq in
+roughly 11 s instead of about 40 s. Groq's own timeouts (60 s text / 90 s vision) are unchanged.
 
 ### GET /graph
 
@@ -302,11 +315,11 @@ There are seven standalone scripts (no pytest needed). Run each from `backend/`:
 ```powershell
 python tests/run_tests.py          # analyze, graph, node details, filtering, failure cases
 python tests/test_gemini_http.py   # Gemini HTTP request/response handling
-python tests/test_gemini_retry.py  # retry/backoff and quota-exhausted 429
+python tests/test_gemini_retry.py  # retry/backoff and quota-exhausted 429 (no Groq backup)
 python tests/test_uploads.py       # PDF, DOCX, TXT/MD, PNG/JPG, validation errors
 python tests/test_reset.py         # DELETE /graph
 python tests/test_sources.py       # GET /sources
-python tests/test_groq_failover.py # Gemini -> Groq automatic failover (text and vision)
+python tests/test_groq_failover.py # Gemini -> Groq failover, retry budget and timeouts (text and vision)
 ```
 
 They use a temporary database and mocked/canned AI replies (defined only inside the tests),
