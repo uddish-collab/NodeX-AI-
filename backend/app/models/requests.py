@@ -1,22 +1,25 @@
-"""Request/response bodies for the non-graph endpoints."""
+"""Request/response bodies for the API."""
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.models.graph import GraphResponse
 
 
 class AnalyzeRequest(BaseModel):
     text: str = Field(..., max_length=settings.max_text_chars)
-
-
-class AnalyzeResponse(GraphResponse):
-    status: str  # "placeholder" until real AI analysis exists
-    message: str
-    input_length: int
+    # Optional label for traceability (e.g. the uploaded filename).
+    source_name: str = Field("Pasted text", min_length=1, max_length=255)
+    source_type: Literal["text", "pdf", "image"] = "text"
 
 
 class UploadResponse(BaseModel):
     filename: str
     content_type: str
     size: int
-    status: str
+    status: str  # "received"
+    kind: str  # "pdf" | "text" | "image"
+    extraction_status: str  # "extracted" | "no_text_found" | "not_configured"
+    text: str  # extracted text, ready to send to /analyze
+    truncated: bool  # true if text was cut to the max length
+    message: str | None = None

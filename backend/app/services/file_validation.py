@@ -12,14 +12,16 @@ ALLOWED_EXTENSIONS = {
 }
 
 
-def is_supported(filename: str, content_type: str | None) -> bool:
+def detect_kind(filename: str, content_type: str | None) -> str | None:
+    """Return "pdf", "text" or "image", or None if unsupported."""
     kind = ALLOWED_EXTENSIONS.get(PurePath(filename).suffix.lower())
     if kind is None:
-        return False
+        return None
     ct = (content_type or "").lower()
     # Content type must agree with the extension's kind.
-    if kind == "pdf":
-        return ct == "application/pdf"
-    if kind == "text":
-        return ct.startswith("text/")
-    return ct.startswith("image/")
+    ok = {
+        "pdf": ct == "application/pdf",
+        "text": ct.startswith("text/"),
+        "image": ct.startswith("image/"),
+    }[kind]
+    return kind if ok else None

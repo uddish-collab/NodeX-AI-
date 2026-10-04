@@ -2,7 +2,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.core.config import settings
 from app.models.requests import UploadResponse
-from app.services.file_validation import ALLOWED_EXTENSIONS, is_supported
+from app.services import content_extractor
+from app.services.file_validation import ALLOWED_EXTENSIONS, detect_kind
 
 router = APIRouter()
 
@@ -13,7 +14,8 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     if not filename:
         raise HTTPException(status_code=400, detail="No file was provided.")
 
-    if not is_supported(filename, file.content_type):
+    kind = detect_kind(filename, file.content_type)
+    if kind is None:
         allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
         raise HTTPException(
             status_code=415,
@@ -30,10 +32,32 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    # The file is only held in memory for now; nothing is written to disk.
+    # Extraction happens in memory; nothing is written to disk.
+    message = None
+    if kind == "pdf":
+        text = content_extractor.extract_from_pdf(data)
+    elif kind == "text":
+        text = content_extractor.extract_from_text(data)
+    else:
+        image = content_extractor.extract_from_image(data, file.content_type or "")
+        text, message = image.text, image.message
+
+    if text:
+        extraction_status = "extracted"
+    elif kind == "image":
+        extraction_status = "not_configured"
+    else:
+        extraction_status = "no_text_found"
+        message = "No readable text found (a scanned PDF or a blank file?)."
+
     return UploadResponse(
         filename=filename,
         content_type=file.content_type or "",
         size=len(data),
         status="received",
+        kind=kind,
+        extraction_status=extraction_status,
+        text=text[: settings.max_text_chars],
+        truncated=len(text) > settings.max_text_chars,
+        message=message,
     )
