@@ -2913,3 +2913,19 @@ nav {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+/* Node types produced by the backend */
+.node-type-event .node-type-dot { background:#ff8a7a; box-shadow:0 0 8px #ff8a7a; }
+.inspector-node-icon.type-event { color:#ff8a7a; }
+.search-result-node-dot.node-type-event { background:#ff8a7a; box-shadow:0 0 9px #ff8a7a; }
+.node-type-technology .node-type-dot { background:#5ee0e0; box-shadow:0 0 8px #5ee0e0; }
+.inspector-node-icon.type-technology { color:#5ee0e0; }
+.search-result-node-dot.node-type-technology { background:#5ee0e0; box-shadow:0 0 9px #5ee0e0; }
+.node-type-deadline .node-type-dot { background:#ffd166; box-shadow:0 0 8px #ffd166; }
+.inspector-node-icon.type-deadline { color:#ffd166; }
+.search-result-node-dot.node-type-deadline { background:#ffd166; box-shadow:0 0 9px #ffd166; }
+.node-type-resource .node-type-dot { background:#9be37a; box-shadow:0 0 8px #9be37a; }
+.inspector-node-icon.type-resource { color:#9be37a; }
+.search-result-node-dot.node-type-resource { background:#9be37a; box-shadow:0 0 9px #9be37a; }
+.node-type-concept .node-type-dot { background:#b0b7ff; box-shadow:0 0 8px #b0b7ff; }
+.inspector-node-icon.type-concept { color:#b0b7ff; }
+.search-result-node-dot.node-type-concept { background:#b0b7ff; box-shadow:0 0 9px #b0b7ff; }

@@ -1,108 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
+import { analyzeText, getGraph, getNodeDetails, uploadFile } from "./api";
 
-const graphData = {
-  nodes: [
-    {
-      id: "document-1",
-      label: "Document",
-      type: "document",
-      description:
-        "A source document containing information that can be processed and connected to other knowledge.",
-      x: 17,
-      y: 27,
-    },
-    {
-      id: "person-1",
-      label: "Person",
-      type: "person",
-      description:
-        "A person or entity identified within the source information.",
-      x: 48,
-      y: 19,
-    },
-    {
-      id: "topic-1",
-      label: "Topic",
-      type: "topic",
-      description:
-        "A subject or concept discovered in the source information.",
-      x: 80,
-      y: 29,
-    },
-    {
-      id: "project-1",
-      label: "Project",
-      type: "project",
-      description:
-        "A project, initiative, or piece of work connected to the extracted knowledge.",
-      x: 29,
-      y: 69,
-    },
-    {
-      id: "organization-1",
-      label: "Organization",
-      type: "organization",
-      description:
-        "An organization, group, company, or institution connected to the knowledge.",
-      x: 60,
-      y: 58,
-    },
-    {
-      id: "location-1",
-      label: "Location",
-      type: "location",
-      description:
-        "A place or geographic reference connected to the extracted information.",
-      x: 82,
-      y: 72,
-    },
-  ],
-  edges: [
-    {
-      id: "edge-1",
-      source: "document-1",
-      target: "person-1",
-      relationship: "mentions",
-      explanation: "The document contains information about this person.",
-    },
-    {
-      id: "edge-2",
-      source: "document-1",
-      target: "topic-1",
-      relationship: "discusses",
-      explanation: "The document discusses this topic.",
-    },
-    {
-      id: "edge-3",
-      source: "document-1",
-      target: "project-1",
-      relationship: "describes",
-      explanation: "The document contains information about this project.",
-    },
-    {
-      id: "edge-4",
-      source: "project-1",
-      target: "organization-1",
-      relationship: "associated with",
-      explanation: "The project is associated with this organization.",
-    },
-    {
-      id: "edge-5",
-      source: "organization-1",
-      target: "location-1",
-      relationship: "located in",
-      explanation: "The organization is connected to this location.",
-    },
-    {
-      id: "edge-6",
-      source: "topic-1",
-      target: "project-1",
-      relationship: "related to",
-      explanation: "This topic is related to the project.",
-    },
-  ],
-};
 const buildGraphLayout = (nodes = []) => {
   if (!nodes.length) return [];
 
@@ -119,6 +18,11 @@ const buildGraphLayout = (nodes = []) => {
     };
   });
 };
+// Backend /analyze accepts source_type text | pdf | image.
+// DOCX (and TXT/MD) are analyzed as extracted text.
+const toSourceType = (kind) =>
+  kind === "pdf" || kind === "image" ? kind : "text";
+
 const getNodeTypeLabel = (type) =>
   ({
     document: "DOC",
@@ -127,16 +31,209 @@ const getNodeTypeLabel = (type) =>
     project: "PRJ",
     organization: "ORG",
     location: "LOC",
+    event: "EVT",
+    technology: "TEC",
+    deadline: "DUE",
+    resource: "RES",
+    concept: "CON",
   }[type] || "NODE");
 
+// Defined at module scope (not inside App) so React keeps its state between renders.
+function SearchBox({
+  compact = false,
+  hasGraph,
+  searchFocused,
+  setSearchFocused,
+  searchTerm,
+  setSearchTerm,
+  setSearchMessage,
+  handleSearch,
+  clearSearch,
+  showSearchResults,
+  totalSearchResults,
+  documentSearchResults,
+  nodeSearchResults,
+  handleDocumentSearchResult,
+  handleNodeSearchResult,
+  getFileType,
+}) {
+  return (
+    <div
+      className={`global-search-container ${
+        compact ? "compact-search" : ""
+      }`}
+    >
+      <div
+        className={`search-input-wrapper ${
+          searchFocused ? "search-active" : ""
+        }`}
+      >
+        <span className="search-icon">⌕</span>
+
+        <input
+          type="text"
+          placeholder="Search documents, people, topics, projects..."
+          value={searchTerm}
+          onFocus={() => setSearchFocused(true)}
+          onChange={(event) => {
+            setSearchTerm(event.target.value);
+            setSearchMessage("");
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              handleSearch();
+            }
+
+            if (event.key === "Escape") {
+              clearSearch();
+            }
+          }}
+        />
+
+        {searchTerm && (
+          <button
+            className="clear-search"
+            onClick={clearSearch}
+            aria-label="Clear search"
+          >
+            ×
+          </button>
+        )}
+
+        {showSearchResults && (
+          <div className="search-results">
+            {totalSearchResults === 0 ? (
+              <div className="search-empty">
+                <div className="search-empty-icon">⌕</div>
+
+                <strong>No results found</strong>
+
+                <span>
+                  Try a document name, node type, topic,
+                  project, or keyword.
+                </span>
+              </div>
+            ) : (
+              <>
+                {documentSearchResults.length > 0 && (
+                  <div className="search-result-group">
+                    <div className="search-result-heading">
+                      DOCUMENTS
+                    </div>
+
+                    {documentSearchResults.map(
+                      (document) => (
+                        <button
+                          key={document.id}
+                          className="search-result-item"
+                          onMouseDown={(event) =>
+                            event.preventDefault()
+                          }
+                          onClick={() =>
+                            handleDocumentSearchResult(
+                              document.id
+                            )
+                          }
+                        >
+                          <div className="search-result-icon document-result">
+                            {getFileType(
+                              document.file.name
+                            )}
+                          </div>
+
+                          <div className="search-result-content">
+                            <strong>
+                              {document.file.name}
+                            </strong>
+
+                            <span>
+                              {document.status ===
+                              "processed"
+                                ? "Processed document"
+                                : document.status === "failed"
+                                ? "Processing failed"
+                                : "Processing document"}
+                            </span>
+                          </div>
+
+                          <span className="search-result-arrow">
+                            →
+                          </span>
+                        </button>
+                      )
+                    )}
+                  </div>
+                )}
+
+                {nodeSearchResults.length > 0 && (
+                  <div className="search-result-group">
+                    <div className="search-result-heading">
+                      KNOWLEDGE NODES
+                    </div>
+
+                    {nodeSearchResults.map((node) => (
+                      <button
+                        key={node.id}
+                        className={`search-result-item ${
+                          !hasGraph
+                            ? "search-result-disabled"
+                            : ""
+                        }`}
+                        onMouseDown={(event) =>
+                          event.preventDefault()
+                        }
+                        onClick={() =>
+                          handleNodeSearchResult(
+                            node.id
+                          )
+                        }
+                      >
+                        <div
+                          className={`search-result-node-dot node-type-${node.type}`}
+                        ></div>
+
+                        <div className="search-result-content">
+                          <strong>
+                            {node.label}
+                          </strong>
+
+                          <span>
+                            {node.type.toUpperCase()}
+                          </span>
+                        </div>
+
+                        <span className="search-result-arrow">
+                          →
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <button
+        className="search-button"
+        onClick={handleSearch}
+      >
+        Search
+      </button>
+    </div>
+  );
+}
+
 function KnowledgeGraph({
-  processed,
+  graph,
+  graphError,
   processing,
   selectedNode,
   onSelect,
   full = false,
 }) {
-  if (!processed) {
+  if (!graph.nodes.length) {
     return (
       <div className={`graph-placeholder ${full ? "full-graph-host" : ""}`}>
         <div className="graph-empty-state">
@@ -149,7 +246,9 @@ function KnowledgeGraph({
           </strong>
 
           <span>
-            {processing
+            {graphError
+              ? graphError
+              : processing
               ? "Your graph will appear when processing is complete."
               : "Upload a document to generate connected knowledge."}
           </span>
@@ -166,9 +265,11 @@ function KnowledgeGraph({
         preserveAspectRatio="none"
         aria-hidden="true"
       >
-        {graphData.edges.map((edge) => {
-          const source = graphData.nodes.find((n) => n.id === edge.source);
-          const target = graphData.nodes.find((n) => n.id === edge.target);
+        {graph.edges.map((edge) => {
+          const source = graph.nodes.find((n) => n.id === edge.source);
+          const target = graph.nodes.find((n) => n.id === edge.target);
+
+          if (!source || !target) return null;
 
           const active =
             selectedNode === edge.source || selectedNode === edge.target;
@@ -186,7 +287,7 @@ function KnowledgeGraph({
         })}
       </svg>
 
-      {graphData.nodes.map((node) => (
+      {graph.nodes.map((node) => (
         <button
           key={node.id}
           type="button"
@@ -211,8 +312,16 @@ function KnowledgeGraph({
   );
 }
 
-function NodeInspector({ selectedNode, full = false, onViewMap }) {
-  const node = graphData.nodes.find((item) => item.id === selectedNode);
+function NodeInspector({
+  graph,
+  details,
+  detailsLoading,
+  detailsError,
+  selectedNode,
+  full = false,
+  onViewMap,
+}) {
+  const node = graph.nodes.find((item) => item.id === selectedNode);
 
   if (!node) {
     return (
@@ -232,19 +341,18 @@ function NodeInspector({ selectedNode, full = false, onViewMap }) {
     );
   }
 
-  const connections = graphData.edges
-    .filter(
-      (edge) => edge.source === node.id || edge.target === node.id
-    )
-    .map((edge) => {
-      const otherId =
-        edge.source === node.id ? edge.target : edge.source;
+  // Relationships and neighbours come from GET /graph/node/{id}.
+  const connections = (details?.relationships || []).map((edge) => {
+    const otherId = edge.source === node.id ? edge.target : edge.source;
 
-      return {
-        ...edge,
-        other: graphData.nodes.find((item) => item.id === otherId),
-      };
-    });
+    return {
+      ...edge,
+      other: details.connected_nodes.find((item) => item.id === otherId),
+      otherId,
+    };
+  });
+
+  const source = details?.source;
 
   return (
     <div className={full ? "map-inspector-content" : "node-inspector"}>
@@ -278,17 +386,35 @@ function NodeInspector({ selectedNode, full = false, onViewMap }) {
         <span
           className={full ? "map-inspector-label" : "inspector-label"}
         >
-          DESCRIPTION
+          SOURCE
         </span>
 
-        <p className={full ? "map-description" : ""}>
-          {node.description}
-        </p>
+        {detailsError ? (
+          <p className={full ? "map-description" : ""}>
+            Could not load details: {detailsError}
+          </p>
+        ) : detailsLoading || !source ? (
+          <p className={full ? "map-description" : ""}>
+            Loading details...
+          </p>
+        ) : (
+          <>
+            <p className={full ? "map-description" : ""}>
+              <strong>{source.name}</strong>
+            </p>
+
+            <p className={full ? "map-description" : ""}>
+              {source.excerpt}
+            </p>
+          </>
+        )}
       </div>
 
       <div className="inspector-stat-line">
         <span>Connections</span>
-        <strong>{connections.length}</strong>
+        <strong>
+          {detailsLoading || detailsError ? "-" : connections.length}
+        </strong>
       </div>
 
       <div className={full ? "" : "inspector-section"}>
@@ -302,7 +428,9 @@ function NodeInspector({ selectedNode, full = false, onViewMap }) {
           {connections.map((connection) => (
             <div className="relationship-card" key={connection.id}>
               <div className="relationship-top">
-                <strong>{connection.other.label}</strong>
+                <strong>
+                  {connection.other?.label ?? connection.otherId}
+                </strong>
                 <span>{connection.relationship}</span>
               </div>
 
@@ -326,6 +454,15 @@ function NodeInspector({ selectedNode, full = false, onViewMap }) {
 
 function App() {
   const [documents, setDocuments] = useState([]);
+
+  // Real graph from the backend (nodes/edges), plus details for the selected node.
+  const [graph, setGraph] = useState({ nodes: [], edges: [] });
+  const [graphError, setGraphError] = useState(null);
+  const [detailsState, setDetailsState] = useState({
+    id: null,
+    data: null,
+    error: null,
+  });
   const [activeDocumentId, setActiveDocumentId] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -368,6 +505,63 @@ function App() {
     localStorage.setItem("nodex-settings", JSON.stringify(settings));
   }, [settings]);
 
+  // Load the saved graph on startup.
+  useEffect(() => {
+    let cancelled = false;
+
+    getGraph()
+      .then((data) => {
+        if (cancelled) return;
+        setGraph({ nodes: data.nodes, edges: data.edges });
+        setGraphError(null);
+      })
+      .catch((error) => {
+        if (!cancelled) setGraphError(error.message);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load details whenever a node is selected.
+  useEffect(() => {
+    if (!selectedNode) return undefined;
+
+    let cancelled = false;
+
+    getNodeDetails(selectedNode)
+      .then((data) => {
+        if (!cancelled)
+          setDetailsState({ id: selectedNode, data, error: null });
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setDetailsState({
+            id: selectedNode,
+            data: null,
+            error: error.message,
+          });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNode]);
+
+  // The backend sends no coordinates, so lay the nodes out here.
+  const laidOutGraph = useMemo(
+    () => ({
+      nodes: buildGraphLayout(graph.nodes),
+      edges: graph.edges,
+    }),
+    [graph]
+  );
+
+  const selectedDetails =
+    detailsState.id === selectedNode ? detailsState : null;
+  const detailsLoading = Boolean(selectedNode) && !selectedDetails;
+
   const updateSetting = (key, value) => {
     setSettings((current) => ({
       ...current,
@@ -408,18 +602,13 @@ function App() {
     (document) => document.status === "processed"
   ).length;
 
-  const knowledgeNodes =
-    processedDocuments > 0 ? graphData.nodes.length : 0;
+  const knowledgeNodes = graph.nodes.length;
 
-  const projectsProcessed =
-    processedDocuments > 0
-      ? graphData.nodes.filter(
-          (node) => node.type === "project"
-        ).length
-      : 0;
+  const projectsProcessed = graph.nodes.filter(
+    (node) => node.type === "project"
+  ).length;
 
-  const connectionsCount =
-    processedDocuments > 0 ? graphData.edges.length : 0;
+  const connectionsCount = graph.edges.length;
 
   /*
    * =========================
@@ -442,12 +631,11 @@ function App() {
 
   const nodeSearchResults =
     normalizedSearch.length > 0
-      ? graphData.nodes
+      ? graph.nodes
           .filter((node) => {
             const searchableText = `
               ${node.label}
               ${node.type}
-              ${node.description}
             `.toLowerCase();
 
             return searchableText.includes(normalizedSearch);
@@ -466,6 +654,92 @@ function App() {
    * FILE HANDLING
    * =========================
    */
+
+  const updateDocument = (documentId, changes) => {
+    setDocuments((currentDocuments) =>
+      currentDocuments.map((document) =>
+        document.id === documentId
+          ? { ...document, ...changes }
+          : document
+      )
+    );
+  };
+
+  /*
+   * Real backend pipeline for one file:
+   * uploading -> uploaded -> analyzing -> processed (or failed)
+   */
+  const processDocument = async (documentId, file) => {
+    try {
+      const uploaded = await uploadFile(file);
+
+      if (!uploaded.text) {
+        throw new Error(
+          uploaded.message ||
+            "No readable text could be extracted from this file."
+        );
+      }
+
+      updateDocument(documentId, {
+        status: "uploaded",
+        extraction: {
+          kind: uploaded.kind,
+          status: uploaded.extraction_status,
+          method: uploaded.extraction_method,
+          truncated: uploaded.truncated,
+          message: uploaded.message,
+        },
+      });
+
+      updateDocument(documentId, { status: "analyzing" });
+
+      const result = await analyzeText(
+        uploaded.text,
+        uploaded.filename || file.name,
+        toSourceType(uploaded.kind)
+      );
+
+      updateDocument(documentId, {
+        status: "processed",
+        error: null,
+        sourceId: result.source_id,
+        analysis: {
+          nodes: result.nodes,
+          edges: result.edges,
+          source_summary: result.source_summary,
+        },
+      });
+
+      // Refresh from the backend; if that fails, still show what /analyze returned.
+      try {
+        const data = await getGraph();
+        setGraph({ nodes: data.nodes, edges: data.edges });
+        setGraphError(null);
+      } catch {
+        setGraph((current) => ({
+          nodes: [
+            ...current.nodes,
+            ...result.nodes.filter(
+              (node) => !current.nodes.some((item) => item.id === node.id)
+            ),
+          ],
+          edges: [
+            ...current.edges,
+            ...result.edges.filter(
+              (edge) => !current.edges.some((item) => item.id === edge.id)
+            ),
+          ],
+        }));
+      }
+    } catch (error) {
+      updateDocument(documentId, {
+        status: "failed",
+        error: error.message,
+      });
+
+      setSearchMessage(`${file.name}: ${error.message}`);
+    }
+  };
 
   const addFiles = (fileList) => {
     const files = Array.from(fileList || []);
@@ -508,7 +782,10 @@ function App() {
       .map((file, index) => ({
         id: `${Date.now()}-${index}-${file.name}`,
         file,
-        status: "uploading",
+        status: settings.autoProcess ? "uploading" : "ready",
+        error: null,
+        sourceId: null,
+        analysis: null,
         addedAt: Date.now() + index,
       }));
 
@@ -529,61 +806,14 @@ function App() {
     setSearchMessage("");
     setIsDragging(false);
 
-    newDocuments.forEach((newDocument, index) => {
-      if (!settings.autoProcess) {
-        setDocuments((currentDocuments) =>
-          currentDocuments.map((document) =>
-            document.id === newDocument.id
-              ? {
-                  ...document,
-                  status: "processed",
-                }
-              : document
-          )
-        );
-
-        return;
-      }
-
-      setTimeout(() => {
-  setDocuments((currentDocuments) =>
-    currentDocuments.map((document) =>
-      document.id === newDocument.id
-        ? {
-            ...document,
-            status: "uploaded",
-          }
-        : document
-    )
-  );
-}, 800);
-
-setTimeout(() => {
-  setDocuments((currentDocuments) =>
-    currentDocuments.map((document) =>
-      document.id === newDocument.id
-        ? {
-            ...document,
-            status: "analyzing",
-          }
-        : document
-    )
-  );
-}, 1800);
-
-setTimeout(() => {
-  setDocuments((currentDocuments) =>
-    currentDocuments.map((document) =>
-      document.id === newDocument.id
-        ? {
-            ...document,
-            status: "processed",
-          }
-        : document
-    )
-  );
-}, 3200);
-    });
+    // Files are processed one after another (not in parallel) to be gentle on the AI API.
+    if (settings.autoProcess) {
+      (async () => {
+        for (const newDocument of newDocuments) {
+          await processDocument(newDocument.id, newDocument.file);
+        }
+      })();
+    }
   };
 
   const handleFileChange = (event) => {
@@ -736,13 +966,13 @@ setTimeout(() => {
   };
 
   const handleNodeSearchResult = (nodeId) => {
-    const node = graphData.nodes.find(
+    const node = graph.nodes.find(
       (item) => item.id === nodeId
     );
 
     if (!node) return;
 
-    if (processedDocuments === 0) {
+    if (graph.nodes.length === 0) {
       setSearchMessage(
         "Upload and process a document before exploring knowledge nodes."
       );
@@ -837,175 +1067,27 @@ setTimeout(() => {
 
   /*
    * =========================
-   * SEARCH COMPONENT
+   * SEARCH COMPONENT PROPS
    * =========================
    */
 
-  const SearchBox = ({ compact = false }) => (
-    <div
-      className={`global-search-container ${
-        compact ? "compact-search" : ""
-      }`}
-    >
-      <div
-        className={`search-input-wrapper ${
-          searchFocused ? "search-active" : ""
-        }`}
-      >
-        <span className="search-icon">⌕</span>
-
-        <input
-          type="text"
-          placeholder="Search documents, people, topics, projects..."
-          value={searchTerm}
-          onFocus={() => setSearchFocused(true)}
-          onChange={(event) => {
-            setSearchTerm(event.target.value);
-            setSearchMessage("");
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              handleSearch();
-            }
-
-            if (event.key === "Escape") {
-              clearSearch();
-            }
-          }}
-        />
-
-        {searchTerm && (
-          <button
-            className="clear-search"
-            onClick={clearSearch}
-            aria-label="Clear search"
-          >
-            ×
-          </button>
-        )}
-
-        {showSearchResults && (
-          <div className="search-results">
-            {totalSearchResults === 0 ? (
-              <div className="search-empty">
-                <div className="search-empty-icon">⌕</div>
-
-                <strong>No results found</strong>
-
-                <span>
-                  Try a document name, node type, topic,
-                  project, or keyword.
-                </span>
-              </div>
-            ) : (
-              <>
-                {documentSearchResults.length > 0 && (
-                  <div className="search-result-group">
-                    <div className="search-result-heading">
-                      DOCUMENTS
-                    </div>
-
-                    {documentSearchResults.map(
-                      (document) => (
-                        <button
-                          key={document.id}
-                          className="search-result-item"
-                          onMouseDown={(event) =>
-                            event.preventDefault()
-                          }
-                          onClick={() =>
-                            handleDocumentSearchResult(
-                              document.id
-                            )
-                          }
-                        >
-                          <div className="search-result-icon document-result">
-                            {getFileType(
-                              document.file.name
-                            )}
-                          </div>
-
-                          <div className="search-result-content">
-                            <strong>
-                              {document.file.name}
-                            </strong>
-
-                            <span>
-                              {document.status ===
-                              "processed"
-                                ? "Processed document"
-                                : "Processing document"}
-                            </span>
-                          </div>
-
-                          <span className="search-result-arrow">
-                            →
-                          </span>
-                        </button>
-                      )
-                    )}
-                  </div>
-                )}
-
-                {nodeSearchResults.length > 0 && (
-                  <div className="search-result-group">
-                    <div className="search-result-heading">
-                      KNOWLEDGE NODES
-                    </div>
-
-                    {nodeSearchResults.map((node) => (
-                      <button
-                        key={node.id}
-                        className={`search-result-item ${
-                          processedDocuments === 0
-                            ? "search-result-disabled"
-                            : ""
-                        }`}
-                        onMouseDown={(event) =>
-                          event.preventDefault()
-                        }
-                        onClick={() =>
-                          handleNodeSearchResult(
-                            node.id
-                          )
-                        }
-                      >
-                        <div
-                          className={`search-result-node-dot node-type-${node.type}`}
-                        ></div>
-
-                        <div className="search-result-content">
-                          <strong>
-                            {node.label}
-                          </strong>
-
-                          <span>
-                            {node.type.toUpperCase()} •{" "}
-                            {node.description}
-                          </span>
-                        </div>
-
-                        <span className="search-result-arrow">
-                          →
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      <button
-        className="search-button"
-        onClick={handleSearch}
-      >
-        Search
-      </button>
-    </div>
-  );
+  const searchBoxProps = {
+    hasGraph: graph.nodes.length > 0,
+    searchFocused,
+    setSearchFocused,
+    searchTerm,
+    setSearchTerm,
+    setSearchMessage,
+    handleSearch,
+    clearSearch,
+    showSearchResults,
+    totalSearchResults,
+    documentSearchResults,
+    nodeSearchResults,
+    handleDocumentSearchResult,
+    handleNodeSearchResult,
+    getFileType,
+  };
 
   return (
     <div
@@ -1085,7 +1167,7 @@ setTimeout(() => {
 
           <div className="topbar-actions">
             {activePage !== "Dashboard" && (
-              <SearchBox compact />
+              <SearchBox compact {...searchBoxProps} />
             )}
 
             {/* PROFILE */}
@@ -1173,7 +1255,7 @@ setTimeout(() => {
 
         {activePage === "Dashboard" && (
           <>
-            <SearchBox />
+            <SearchBox {...searchBoxProps} />
 
             {searchMessage && (
               <div className="search-message search-feedback">
@@ -1389,7 +1471,8 @@ setTimeout(() => {
                 </div>
 
                 <KnowledgeGraph
-                  processed={processed}
+                  graph={laidOutGraph}
+                  graphError={graphError}
                   processing={processing}
                   selectedNode={selectedNode}
                   onSelect={selectNode}
@@ -1411,6 +1494,10 @@ setTimeout(() => {
 
                 <div className="inspector-content">
                   <NodeInspector
+                    graph={laidOutGraph}
+                    details={selectedDetails?.data}
+                    detailsLoading={detailsLoading}
+                    detailsError={selectedDetails?.error}
                     selectedNode={selectedNode}
                     onViewMap={() =>
                       setActivePage("Knowledge Map")
@@ -1447,7 +1534,7 @@ setTimeout(() => {
               </button>
             </div>
 
-            {processedDocuments === 0 ? (
+            {graph.nodes.length === 0 ? (
               <div className="dashboard-empty-state">
                 <div className="dashboard-empty-icon">
                   ◇
@@ -1473,7 +1560,8 @@ setTimeout(() => {
               <div className="knowledge-map-layout">
                 <div className="full-map-placeholder">
                   <KnowledgeGraph
-                    processed={processed}
+                    graph={laidOutGraph}
+                    graphError={graphError}
                     processing={processing}
                     selectedNode={selectedNode}
                     onSelect={selectNode}
@@ -1483,6 +1571,10 @@ setTimeout(() => {
 
                 <div className="map-inspector">
                   <NodeInspector
+                    graph={laidOutGraph}
+                    details={selectedDetails?.data}
+                    detailsLoading={detailsLoading}
+                    detailsError={selectedDetails?.error}
                     selectedNode={selectedNode}
                     full
                   />
@@ -1540,11 +1632,16 @@ setTimeout(() => {
                   const isActive =
                     document.id === activeDocumentId;
 
-                  const isProcessing =
-                    document.status === "processing";
+                  const isProcessing = [
+                    "uploading",
+                    "uploaded",
+                    "analyzing",
+                  ].includes(document.status);
 
                   const isProcessed =
                     document.status === "processed";
+
+                  const isFailed = document.status === "failed";
 
                   return (
                     <div
@@ -1587,7 +1684,9 @@ setTimeout(() => {
                             {isProcessing
                               ? "Processing document..."
                               : isProcessed
-                              ? `Processed • ${graphData.nodes.length} nodes • ${graphData.edges.length} connections`
+                              ? `Processed • ${document.analysis?.nodes.length ?? 0} nodes • ${document.analysis?.edges.length ?? 0} connections`
+                              : isFailed
+                              ? `Failed • ${document.error}`
                               : "Ready to process"}
                           </small>
                         </div>
