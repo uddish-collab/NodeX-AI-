@@ -151,6 +151,12 @@ def gemini_configured() -> bool:
 # One attempt only: Gemini already retries, and a Groq failure is the end of the line.
 # ---------------------------------------------------------------------------
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MAX_OUTPUT_TOKENS = 900  # stays under Groq's per-request output limit (1000)
+GROQ_BREVITY_HINT = (
+    "\n\nKeep the JSON compact so it fits in about 800 tokens: one short sentence "
+    "(under 15 words) per relationship explanation, a one-sentence source_summary, "
+    "and at most 12 entities."
+)
 
 
 def groq_configured() -> bool:
@@ -176,7 +182,12 @@ def _groq_error_message(e: urllib.error.HTTPError) -> str:
 def _groq_generate(messages: list[dict], timeout: int = 60, json_mode: bool = False) -> str:
     """POST a chat completion to Groq and return the reply text. The key goes in the
     Authorization header only (never the URL)."""
-    body: dict = {"model": settings.groq_model, "messages": messages, "temperature": 0}
+    body: dict = {
+        "model": settings.groq_model,
+        "messages": messages,
+        "temperature": 0,
+        "max_tokens": GROQ_MAX_OUTPUT_TOKENS,
+    }
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     request = urllib.request.Request(
@@ -206,7 +217,7 @@ def _call_groq(text: str) -> str:
     return _groq_generate(
         [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(text)},
+            {"role": "user", "content": build_user_prompt(text) + GROQ_BREVITY_HINT},
         ],
         json_mode=True,
     )
