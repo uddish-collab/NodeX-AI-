@@ -88,3 +88,10 @@ def clear_all(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM relationships")
         conn.execute("DELETE FROM entities")
         conn.execute("DELETE FROM sources")
+
+
+def list_sources(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """All sources, oldest first. Deliberately leaves out the stored content."""
+    return conn.execute(
+        "SELECT id, name, source_type, created_at FROM sources ORDER BY id"
+    ).fetchall()

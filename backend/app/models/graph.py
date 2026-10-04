@@ -43,3 +43,10 @@ class NodeDetails(BaseModel):
     connected_nodes: list[Node]
     relationships: list[Edge]
     source: SourceInfo | None
+
+
+class SourceSummary(BaseModel):
+    id: str  # e.g. "s3"
+    name: str
+    source_type: str
+    created_at: str

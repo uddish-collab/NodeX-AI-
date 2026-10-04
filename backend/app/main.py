@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.db.database import init_db
-from app.routes import analyze, graph, health, upload
+from app.routes import analyze, graph, health, sources, upload
 from app.services.errors import ServiceError
 
 
@@ -30,6 +30,7 @@ app.include_router(health.router)
 app.include_router(upload.router)
 app.include_router(analyze.router)
 app.include_router(graph.router)
+app.include_router(sources.router)
 
 
 @app.exception_handler(ServiceError)
