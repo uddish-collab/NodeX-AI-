@@ -2929,3 +2929,14 @@ nav {
 .node-type-concept .node-type-dot { background:#b0b7ff; box-shadow:0 0 8px #b0b7ff; }
 .inspector-node-icon.type-concept { color:#b0b7ff; }
 .search-result-node-dot.node-type-concept { background:#b0b7ff; box-shadow:0 0 9px #b0b7ff; }
+
+/* Knowledge Map: which document the map is filtered to */
+.map-scope-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 14px;
+  font-size: 13px;
+  opacity: 0.9;
+}

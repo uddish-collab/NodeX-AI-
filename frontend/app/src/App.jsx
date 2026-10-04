@@ -234,6 +234,8 @@ function SearchBox({
 function KnowledgeGraph({
   graph,
   graphError,
+  emptyTitle,
+  emptyMessage,
   processing,
   selectedNode,
   onSelect,
@@ -248,7 +250,7 @@ function KnowledgeGraph({
           <strong>
             {processing
               ? "Building knowledge map..."
-              : "No knowledge map yet"}
+              : emptyTitle || "No knowledge map yet"}
           </strong>
 
           <span>
@@ -256,7 +258,8 @@ function KnowledgeGraph({
               ? graphError
               : processing
               ? "Your graph will appear when processing is complete."
-              : "Upload a document to generate connected knowledge."}
+              : emptyMessage ||
+                "Upload a document to generate connected knowledge."}
           </span>
         </div>
       </div>
@@ -637,6 +640,33 @@ function App() {
 
     return [...savedOnly, ...documents];
   }, [documents, savedSources]);
+
+  // The selected document (if any) decides which part of the graph the
+  // Knowledge Map page shows. With nothing selected it shows everything.
+  const scopeDocument =
+    allDocuments.find((document) => document.id === activeDocumentId) ||
+    null;
+  const scopeSourceId = scopeDocument?.sourceId ?? null;
+
+  const mapGraph = useMemo(() => {
+    if (!scopeDocument) return laidOutGraph;
+
+    // A document with no source_id yet (still processing, or failed) has no nodes.
+    const nodes = graph.nodes.filter(
+      (node) => scopeSourceId && node.source_id === scopeSourceId
+    );
+    const edges = graph.edges.filter(
+      (edge) => scopeSourceId && edge.source_id === scopeSourceId
+    );
+
+    return { nodes: buildGraphLayout(nodes), edges };
+  }, [graph, laidOutGraph, scopeDocument, scopeSourceId]);
+
+  const scopeEmptyMessage = scopeDocument
+    ? scopeDocument.status === "failed"
+      ? `${scopeDocument.file.name} could not be processed: ${scopeDocument.error}`
+      : `No knowledge nodes were found in ${scopeDocument.file.name}.`
+    : undefined;
 
   // Node / connection counts for one source, from the loaded graph.
   const countsForDocument = (document) =>
@@ -1028,7 +1058,9 @@ function App() {
   };
 
   const selectDocument = (documentId) => {
-    setActiveDocumentId(documentId);
+    setActiveDocumentId((current) =>
+      current === documentId ? null : documentId
+    );
     setSelectedNode(null);
     setSearchMessage("");
   };
@@ -1078,6 +1110,10 @@ function App() {
         "Upload and process a document before exploring knowledge nodes."
       );
       return;
+    }
+
+    if (scopeDocument && node.source_id !== scopeSourceId) {
+      setActiveDocumentId(null);
     }
 
     setSelectedNode(nodeId);
@@ -1635,6 +1671,22 @@ function App() {
               </button>
             </div>
 
+            {scopeDocument && graph.nodes.length > 0 && (
+              <div className="map-scope-bar">
+                <span>
+                  Showing the map for{" "}
+                  <strong>{scopeDocument.file.name}</strong>
+                </span>
+
+                <button
+                  className="view-button"
+                  onClick={() => setActiveDocumentId(null)}
+                >
+                  Show all documents
+                </button>
+              </div>
+            )}
+
             {graph.nodes.length === 0 ? (
               <div className="dashboard-empty-state">
                 <div className="dashboard-empty-icon">
@@ -1661,8 +1713,12 @@ function App() {
               <div className="knowledge-map-layout">
                 <div className="full-map-placeholder">
                   <KnowledgeGraph
-                    graph={laidOutGraph}
+                    graph={mapGraph}
                     graphError={graphError}
+                    emptyTitle={
+                      scopeDocument ? "No nodes for this document" : undefined
+                    }
+                    emptyMessage={scopeEmptyMessage}
                     processing={processing}
                     selectedNode={selectedNode}
                     onSelect={selectNode}
