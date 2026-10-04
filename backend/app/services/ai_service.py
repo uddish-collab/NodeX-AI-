@@ -1,4 +1,8 @@
 """Provider-neutral AI analysis. Pick the provider with AI_PROVIDER in .env."""
+import json
+import urllib.error
+import urllib.request
+
 from pydantic import ValidationError
 
 from app.core.config import settings
@@ -30,24 +34,45 @@ def _call_openai(text: str) -> str:
         raise AIProviderError(f"OpenAI request failed: {e}")
 
 
-def _call_gemini(text: str) -> str:
-    from google import genai
-    from google.genai import errors, types
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+
+def _call_gemini(text: str) -> str:
+    # Plain REST call (standard library only). The key goes in a header, never in
+    # the URL, so it cannot leak into error messages.
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": build_user_prompt(text)}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+    }
+    request = urllib.request.Request(
+        GEMINI_URL.format(model=settings.gemini_model),
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": settings.gemini_api_key or ""},
+        method="POST",
+    )
     try:
-        client = genai.Client(api_key=settings.gemini_api_key)
-        resp = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=build_user_prompt(text),
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                temperature=0,
-            ),
-        )
-        return resp.text or ""
-    except errors.APIError as e:
-        raise AIProviderError(f"Gemini request failed: {e}")
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            body = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise AIProviderError(f"Gemini request failed: HTTP {e.code} {_gemini_error_message(e)}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise AIProviderError(f"Gemini request failed: could not reach the API ({e})")
+    except ValueError:
+        raise AIProviderError("Gemini request failed: response was not valid JSON.")
+
+    # Join the text parts of the first candidate (skipping any "thought" parts).
+    candidates = body.get("candidates") or [{}]
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+
+
+def _gemini_error_message(e: urllib.error.HTTPError) -> str:
+    try:
+        err = json.loads(e.read().decode()).get("error", {})
+        return f"{err.get('status', e.reason)}: {err.get('message', '')}".strip()
+    except Exception:
+        return str(e.reason)
 
 
 # provider name -> (function returning its API key, env var name, call function)

@@ -19,8 +19,9 @@ pip install -r requirements.txt
 ```
 
 Dependencies: `fastapi`, `uvicorn`, `python-multipart`, `python-dotenv`,
-`pymupdf` (PDF text extraction), `openai` and `google-genai` (the two
-supported AI providers; you only need the key for one of them).
+`pymupdf` (PDF text extraction) and `openai` (OpenAI provider SDK). Gemini is
+called over plain HTTP using the standard library, so it needs no extra package.
+You only need the key for the provider you pick.
 
 ## Configure the AI provider
 
