@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import {
   analyzeText,
@@ -24,6 +24,158 @@ const buildGraphLayout = (nodes = []) => {
     };
   });
 };
+/*
+ * Readable layout for the graph canvas. Works in pixels, so it needs the canvas size:
+ *  1. one cluster per source document, clusters arranged in a grid;
+ *  2. the best-connected node of a cluster sits in the middle, the others around it;
+ *  3. chips that still overlap are pushed apart, and kept inside the canvas.
+ * Returns Map(nodeId -> {x, y}) in percent, or null when the size is not known yet
+ * (the caller then keeps the simple circular layout from buildGraphLayout).
+ */
+const CHIP_HEIGHT = 36; // rendered chips are ~34px tall
+
+// Close to the rendered width (CSS: min 96px, max 200px, 12px bold text).
+const chipWidth = (label = "") =>
+  Math.min(200, Math.max(96, label.length * 6.4 + 44));
+
+const layoutInCanvas = (nodes, edges, width, height, bottomReserve = 44) => {
+  if (!nodes.length || width < 40 || height < 40) return null;
+
+  const size = new Map(
+    nodes.map((node) => [node.id, { w: chipWidth(node.label), h: CHIP_HEIGHT }])
+  );
+  const degree = new Map(nodes.map((node) => [node.id, 0]));
+
+  edges.forEach((edge) => {
+    if (degree.has(edge.source)) degree.set(edge.source, degree.get(edge.source) + 1);
+    if (degree.has(edge.target)) degree.set(edge.target, degree.get(edge.target) + 1);
+  });
+
+  const groups = new Map();
+  nodes.forEach((node) => {
+    const key = node.source_id || "none";
+    groups.set(key, [...(groups.get(key) || []), node]);
+  });
+  const clusters = [...groups.values()];
+
+  // Prefer cells at least ~260px wide, so side-by-side clusters do not get cramped.
+  const maxCols = Math.max(1, Math.floor(width / 260));
+  const cols = Math.min(
+    maxCols,
+    Math.max(1, Math.ceil(Math.sqrt(clusters.length * (width / height))))
+  );
+  const rows = Math.ceil(clusters.length / cols);
+  const cellW = width / cols;
+  const cellH = (height - bottomReserve) / rows;
+
+  const pos = new Map();
+
+  clusters.forEach((cluster, index) => {
+    const cx = ((index % cols) + 0.5) * cellW;
+    const cy = (Math.floor(index / cols) + 0.5) * cellH;
+    const [hub, ...rest] = [...cluster].sort(
+      (a, b) => degree.get(b.id) - degree.get(a.id)
+    );
+    const rx = Math.max(70, cellW / 2 - 100);
+    const ry = Math.max(60, cellH / 2 - 44);
+
+    pos.set(hub.id, { x: cx, y: cy });
+    rest.forEach((node, i) => {
+      const angle = -Math.PI / 2 + (i / rest.length) * Math.PI * 2;
+      pos.set(node.id, {
+        x: cx + Math.cos(angle) * rx,
+        y: cy + Math.sin(angle) * ry,
+      });
+    });
+  });
+
+  const ids = nodes.map((node) => node.id);
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+
+  for (let pass = 0; pass < 120; pass += 1) {
+    let moved = false;
+
+    for (let a = 0; a < ids.length; a += 1) {
+      for (let b = a + 1; b < ids.length; b += 1) {
+        const pa = pos.get(ids[a]);
+        const pb = pos.get(ids[b]);
+        const sa = size.get(ids[a]);
+        const sb = size.get(ids[b]);
+        const dx = pb.x - pa.x;
+        const dy = pb.y - pa.y;
+        const overlapX = (sa.w + sb.w) / 2 + 10 - Math.abs(dx);
+        const overlapY = (sa.h + sb.h) / 2 + 10 - Math.abs(dy);
+
+        if (overlapX > 0 && overlapY > 0) {
+          moved = true;
+
+          if (overlapY < overlapX) {
+            const push = ((dy >= 0 ? 1 : -1) * overlapY) / 2;
+            pa.y -= push;
+            pb.y += push;
+          } else {
+            const push = ((dx >= 0 ? 1 : -1) * overlapX) / 2;
+            pa.x -= push;
+            pb.x += push;
+          }
+        }
+      }
+    }
+
+    ids.forEach((id) => {
+      const point = pos.get(id);
+      const box = size.get(id);
+
+      point.x = clamp(point.x, box.w / 2 + 8, width - box.w / 2 - 8);
+      point.y = clamp(point.y, box.h / 2 + 8, height - bottomReserve - box.h / 2 + 12);
+    });
+
+    if (!moved) break;
+  }
+
+  return new Map(
+    ids.map((id) => {
+      const point = pos.get(id);
+      return [id, { x: (point.x / width) * 100, y: (point.y / height) * 100 }];
+    })
+  );
+};
+
+/*
+ * Where to put a relationship label on the line between two chips: in the middle of the
+ * stretch of line that is NOT hidden behind either chip. Returns null if that gap is too
+ * small to hold the label (so labels never cover node names).
+ */
+const labelSpot = (a, b, text, canvas) => {
+  const ax = (a.x / 100) * canvas.w;
+  const ay = (a.y / 100) * canvas.h;
+  const dx = (b.x / 100) * canvas.w - ax;
+  const dy = (b.y / 100) * canvas.h - ay;
+  const wa = chipWidth(a.label);
+  const wb = chipWidth(b.label);
+  const labelWidth = text.length * 5.6 + 20;
+
+  const gapX = Math.abs(dx) - (wa + wb) / 2;
+  const gapY = Math.abs(dy) - CHIP_HEIGHT;
+
+  if (gapX < labelWidth + 6 && gapY < 26) return null;
+
+  // Fraction of the line that lies inside each chip's box.
+  const inside = (w) =>
+    Math.min(
+      dx ? w / 2 / Math.abs(dx) : Infinity,
+      dy ? CHIP_HEIGHT / 2 / Math.abs(dy) : Infinity
+    );
+  const start = inside(wa);
+  const end = 1 - inside(wb);
+  const t = end > start ? (start + end) / 2 : 0.5;
+
+  return {
+    x: ((ax + dx * t) / canvas.w) * 100,
+    y: ((ay + dy * t) / canvas.h) * 100,
+  };
+};
+
 // Backend /analyze accepts source_type text | pdf | image.
 // DOCX (and TXT/MD) are analyzed as extracted text.
 const toSourceType = (kind) =>
@@ -241,6 +393,61 @@ function KnowledgeGraph({
   onSelect,
   full = false,
 }) {
+  // Measure the canvas so chips can be placed without overlapping.
+  const [canvas, setCanvas] = useState(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+
+  // Measure once as soon as the canvas mounts; the observer below keeps it up to date.
+  const attachCanvas = useCallback((node) => {
+    setCanvas(node);
+
+    if (node) {
+      const box = node.getBoundingClientRect();
+      setCanvasSize({ w: Math.round(box.width), h: Math.round(box.height) });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!canvas) return undefined;
+
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+
+      setCanvasSize((current) =>
+        Math.abs(current.w - width) < 1 && Math.abs(current.h - height) < 1
+          ? current
+          : { w: Math.round(width), h: Math.round(height) }
+      );
+    });
+
+    observer.observe(canvas);
+
+    return () => observer.disconnect();
+  }, [canvas]);
+
+  const nodeTypes = useMemo(
+    () => [...new Set(graph.nodes.map((node) => node.type))],
+    [graph.nodes]
+  );
+
+  const placedNodes = useMemo(() => {
+    // Keep chips clear of the legend, which wraps onto more lines when there are many types.
+    const legendLines = Math.ceil(
+      (nodeTypes.length * 76) / Math.max(120, canvasSize.w * 0.54)
+    );
+    const spots = layoutInCanvas(
+      graph.nodes,
+      graph.edges,
+      canvasSize.w,
+      canvasSize.h,
+      28 + 16 * legendLines
+    );
+
+    return graph.nodes.map((node) =>
+      spots?.get(node.id) ? { ...node, ...spots.get(node.id) } : node
+    );
+  }, [graph.nodes, graph.edges, canvasSize, nodeTypes]);
+
   if (!graph.nodes.length) {
     return (
       <div className={`graph-placeholder ${full ? "full-graph-host" : ""}`}>
@@ -266,8 +473,24 @@ function KnowledgeGraph({
     );
   }
 
+  const nodeById = new Map(placedNodes.map((node) => [node.id, node]));
+
   return (
-    <div className={`data-graph ${full ? "data-graph-full" : ""}`}>
+    <div
+      ref={attachCanvas}
+      className={`data-graph ${full ? "data-graph-full" : ""}`}
+      // The small dashboard preview grows with the number of nodes so big graphs stay readable.
+      style={
+        full
+          ? undefined
+          : {
+              minHeight: Math.min(
+                720,
+                Math.max(360, 200 + graph.nodes.length * 26)
+              ),
+            }
+      }
+    >
       <svg
         className="data-graph-svg"
         viewBox="0 0 100 100"
@@ -275,8 +498,8 @@ function KnowledgeGraph({
         aria-hidden="true"
       >
         {graph.edges.map((edge) => {
-          const source = graph.nodes.find((n) => n.id === edge.source);
-          const target = graph.nodes.find((n) => n.id === edge.target);
+          const source = nodeById.get(edge.source);
+          const target = nodeById.get(edge.target);
 
           if (!source || !target) return null;
 
@@ -296,10 +519,40 @@ function KnowledgeGraph({
         })}
       </svg>
 
-      {graph.nodes.map((node) => (
+      {/* Relationship names for the selected node's connections, only where the gap between
+          the two chips is big enough to hold them (the Inspector lists every relationship). */}
+      {graph.edges
+        .filter(
+          (edge) =>
+            selectedNode === edge.source || selectedNode === edge.target
+        )
+        .map((edge) => {
+          const source = nodeById.get(edge.source);
+          const target = nodeById.get(edge.target);
+
+          if (!source || !target || !canvasSize.w) return null;
+
+          const text = edge.relationship.replace(/_/g, " ");
+          const spot = labelSpot(source, target, text, canvasSize);
+
+          if (!spot) return null;
+
+          return (
+            <span
+              key={`label-${edge.id}`}
+              className="data-edge-label"
+              style={{ left: `${spot.x}%`, top: `${spot.y}%` }}
+            >
+              {text}
+            </span>
+          );
+        })}
+
+      {placedNodes.map((node) => (
         <button
           key={node.id}
           type="button"
+          title={node.label}
           className={`data-graph-node node-type-${node.type} ${
             selectedNode === node.id ? "selected" : ""
           }`}
@@ -310,9 +563,18 @@ function KnowledgeGraph({
           onClick={() => onSelect(node.id)}
         >
           <span className="node-type-dot"></span>
-          <span>{node.label}</span>
+          <span className="data-graph-node-label">{node.label}</span>
         </button>
       ))}
+
+      <div className="graph-legend" aria-hidden="true">
+        {nodeTypes.map((type) => (
+          <span key={type} className={`node-type-${type}`}>
+            <span className="node-type-dot"></span>
+            {type}
+          </span>
+        ))}
+      </div>
 
       <div className="graph-helper-text">
         Click a node to inspect its connections.
@@ -440,7 +702,18 @@ function NodeInspector({
                 <strong>
                   {connection.other?.label ?? connection.otherId}
                 </strong>
-                <span>{connection.relationship}</span>
+                <div className="relationship-meta">
+                  <span>{connection.relationship}</span>
+
+                  {typeof connection.confidence === "number" && (
+                    <em
+                      className="relationship-confidence"
+                      title="How strongly the text supports this relationship"
+                    >
+                      {Math.round(connection.confidence * 100)}%
+                    </em>
+                  )}
+                </div>
               </div>
 
               <p>{connection.explanation}</p>
@@ -1483,6 +1756,8 @@ function App() {
                   } ${
                     processed ? "is-processed" : ""
                   } ${
+                    failed ? "is-failed" : ""
+                  } ${
                     isDragging ? "is-dragging" : ""
                   }`}
                   onDragOver={handleDragOver}
@@ -1532,6 +1807,10 @@ function App() {
                       <div className="processing-bar">
                         <span></span>
                       </div>
+
+                      <span className="upload-hint processing-hint">
+                        This can take up to a minute if the AI service is busy.
+                      </span>
                     </>
                   ) : (
                     <>
@@ -1711,6 +1990,11 @@ function App() {
                 </p>
 
                 <h2>Knowledge Map</h2>
+
+                <p className="map-summary">
+                  {mapGraph.nodes.length} nodes · {mapGraph.edges.length}{" "}
+                  connections
+                </p>
               </div>
 
               <button
@@ -1890,6 +2174,7 @@ function App() {
                           : ""
                       }`}
                       key={document.id}
+                      data-status={document.status}
                       onClick={() =>
                         selectDocument(document.id)
                       }
