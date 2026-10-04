@@ -52,3 +52,10 @@ def get_node(node_id: str, conn: sqlite3.Connection = Depends(get_db)) -> NodeDe
         relationships=[gm.row_to_edge(r) for r in rels],
         source=gm.row_to_source(source) if source else None,
     )
+
+
+@router.delete("/graph")
+def clear_graph(conn: sqlite3.Connection = Depends(get_db)) -> dict[str, str]:
+    """Demo helper: wipe all saved sources, entities and relationships."""
+    repository.clear_all(conn)
+    return {"status": "cleared"}

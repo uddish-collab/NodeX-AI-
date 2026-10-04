@@ -79,3 +79,12 @@ def get_entities_by_ids(conn: sqlite3.Connection, ids: set[int]) -> list[sqlite3
 
 def get_source(conn: sqlite3.Connection, source_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+
+
+def clear_all(conn: sqlite3.Connection) -> None:
+    """Delete every row (children first, so foreign keys are respected).
+    The tables and the database file are kept."""
+    with conn:
+        conn.execute("DELETE FROM relationships")
+        conn.execute("DELETE FROM entities")
+        conn.execute("DELETE FROM sources")
