@@ -1,9 +1,9 @@
 # NodeX Backend
 
 FastAPI backend for NodeX, an AI-powered knowledge mapping system. It extracts
-text from PDFs and text files, asks an AI model to find the key entities and the
-relationships the text supports, saves them in SQLite, and serves the result as a
-`nodes` + `edges` graph for the frontend.
+text from PDF, DOCX, image and text files, asks an AI model to find the key entities
+and the relationships the text supports, saves them in SQLite, and serves the result
+as a `nodes` + `edges` graph for the frontend.
 
 ## Setup
 
@@ -29,17 +29,29 @@ You only need the key for the provider you pick.
 copy .env.example .env
 ```
 
-Edit `.env` (it is git-ignored, never commit it):
+Edit `.env` (it is git-ignored, never commit it). Our current working setup:
 
 ```
-AI_PROVIDER=openai        # or: gemini
-OPENAI_API_KEY=sk-...     # needed if AI_PROVIDER=openai
-GEMINI_API_KEY=...        # needed if AI_PROVIDER=gemini
+AI_PROVIDER=gemini
+GEMINI_API_KEY=<your key>       # never commit a real key
+GEMINI_MODEL=gemini-3.7-flash
 ```
 
-Optional: `OPENAI_MODEL` (default `gpt-4o-mini`), `GEMINI_MODEL` (default
-`gemini-2.0-flash`), `MAX_UPLOAD_MB`, `MAX_TEXT_CHARS`. Restart the server after
-editing `.env`. Without a key, `/analyze` returns a clear `503` error.
+`.env.example` already has these defaults with the key left empty. To use OpenAI for
+text analysis instead, set `AI_PROVIDER=openai` and `OPENAI_API_KEY` (`OPENAI_MODEL`
+defaults to `gpt-4o-mini`).
+
+**Gemini is also required for images and scanned PDFs.** PNG/JPG/JPEG/WEBP reading and
+scanned-PDF OCR always use Gemini, so they need `GEMINI_API_KEY` even when
+`AI_PROVIDER=openai`.
+
+Other optional settings: `MAX_UPLOAD_MB` (default 10), `MAX_TEXT_CHARS` (default 20000),
+`DB_PATH`. Restart the server after editing `.env`. Without a key for the chosen
+provider, `/analyze` returns a clear `503` error.
+
+> If there is no `.env` at all, the code falls back to `AI_PROVIDER=openai` and
+> `GEMINI_MODEL=gemini-2.0-flash`, which is not our working setup. Always copy
+> `.env.example` to `.env`.
 
 ## Run
 
@@ -52,32 +64,38 @@ uvicorn app.main:app --reload
 
 ## Endpoints
 
-| Method | Path       | Purpose                                                      |
-|--------|------------|--------------------------------------------------------------|
-| GET    | `/`        | Identifies the NodeX backend                                 |
-| GET    | `/health`  | Returns `{"status": "ok"}`                                   |
-| POST   | `/upload`  | Validates a PDF / DOCX / image / text file and extracts its text |
-| POST   | `/analyze` | Sends text to the AI, saves the result, returns nodes + edges |
-| GET    | `/graph`   | Returns the saved graph (nodes + edges), optional filters      |
-| GET    | `/graph/node/{id}` | Node details: connections + source                    |
+| Method | Path               | Purpose                                                              |
+|--------|--------------------|----------------------------------------------------------------------|
+| GET    | `/`                | Identifies the NodeX backend                                         |
+| GET    | `/health`          | Returns `{"status": "ok"}`                                           |
+| POST   | `/upload`          | Validates a PDF / DOCX / image / text file and extracts its text     |
+| POST   | `/analyze`         | Sends text to the AI, saves the result, returns nodes + edges        |
+| GET    | `/graph`           | Returns the saved graph (nodes + edges), optional filters            |
+| GET    | `/graph/node/{id}` | Node details: connections + source                                   |
+| GET    | `/sources`         | Lists every saved source (no full text)                              |
+| DELETE | `/graph`           | **Demo reset:** deletes all saved sources, nodes and edges           |
 
 ### POST /upload
 
 Multipart form with a `file` field. Returns the extracted, normalized `text`; send it to `/analyze`.
 
-| Format | Extensions | How text is read |
-|--------|-----------|------------------|
-| PDF | `.pdf` | Text layer via PyMuPDF. If the PDF has no text (scanned), the first 5 pages are read with Gemini vision (OCR) |
-| Word | `.docx` | Paragraphs and table rows from the document XML (standard library, no extra package) |
-| Text | `.txt`, `.md` | Decoded and whitespace-normalized |
-| Image | `.png`, `.jpg`, `.jpeg`, `.webp` | Gemini vision: transcribes text and briefly describes diagrams/screenshots |
+Supported formats:
 
-Max 10 MB. Files are processed in memory, never saved. Legacy `.doc` is not supported
-(the error tells the user to save as `.docx`).
+| Format | Extensions | How text is read | Needs Gemini key? |
+|--------|-----------|------------------|-------------------|
+| PDF | `.pdf` | Text layer via PyMuPDF. If the PDF has no text (scanned), the first 5 pages are read with Gemini vision (OCR) | Only for scanned PDFs |
+| Word | `.docx` | Paragraphs and table rows from the document XML (standard library, no extra package) | No |
+| Text | `.txt`, `.md` | Decoded and whitespace-normalized | No |
+| Image | `.png`, `.jpg`, `.jpeg`, `.webp` | Gemini vision: transcribes text and briefly describes diagrams/screenshots | **Yes** |
 
-Image reading and scanned-PDF OCR always use Gemini, so they need `GEMINI_API_KEY`
-even if `AI_PROVIDER=openai`. Without a key, those files return `extraction_status: "not_configured"`
-(no fake text); PDFs with a text layer, DOCX and TXT still work without any key.
+- **PNG/JPG/JPEG/WEBP and scanned-PDF OCR require a configured `GEMINI_API_KEY`** (even if
+  `AI_PROVIDER=openai`). Without one, those files return `extraction_status: "not_configured"`
+  with an explanatory `message` and empty text (no fake text). PDFs with a text layer, DOCX and
+  TXT/MD work without any key.
+- **Legacy `.doc` is rejected** (`415`) with the message to save the file as `.docx`.
+- Max 10 MB. Files are processed in memory, never saved.
+- The browser's declared MIME type must match the extension (e.g. `image/png` for `.png`).
+  `.docx` also accepts a generic ZIP/octet-stream type.
 
 ```bash
 curl -F "file=@notes.docx" http://127.0.0.1:8000/upload
@@ -92,10 +110,7 @@ curl -F "file=@notes.docx" http://127.0.0.1:8000/upload
   "kind": "docx",
   "extraction_status": "extracted",
   "extraction_method": "direct",
-  "text": "Project Plan
-NodeX uses an AI API.
-Owner | Deadline
-Alice | 7 PM",
+  "text": "Project Plan\nNodeX uses an AI API.\nOwner | Deadline\nAlice | 7 PM",
   "truncated": false,
   "message": null
 }
@@ -114,7 +129,8 @@ Errors: `400` empty/missing file, `413` too large, `415` unsupported type or wro
 
 Sends text to the AI, **saves the result to SQLite**, and returns it as `nodes` + `edges`.
 
-Request (`source_name` and `source_type` are optional, used for traceability):
+Request (`source_name` and `source_type` are optional, used for traceability).
+`source_type` must be `text`, `pdf` or `image`; send `text` for DOCX/TXT/MD (the frontend does):
 
 ```json
 {
@@ -145,9 +161,12 @@ Response:
 }
 ```
 
-Errors: `400` blank text, `422` missing text or over 20000 chars, `502` AI provider
-failed or returned malformed output, `503` AI not configured. On any error
-**nothing is saved**.
+Errors: `400` blank text, `422` missing text, over 20000 chars or an invalid `source_type`,
+`502` AI provider failed or returned malformed output, `503` AI not configured.
+On any error **nothing is saved**.
+
+Gemini calls retry up to 4 times (exponential backoff) on `5xx` and short-term `429`
+rate limits. A daily-quota `429` is **not** retried and fails immediately with a `502`.
 
 ### GET /graph
 
@@ -195,6 +214,31 @@ Details for the node inspector panel. `404` if the node does not exist.
 }
 ```
 
+### GET /sources
+
+Every saved source, oldest first. The full stored text is **not** included. Returns `[]` when empty.
+
+```json
+[
+  { "id": "s1", "name": "notes.txt", "source_type": "text", "created_at": "2026-10-04T12:00:00Z" }
+]
+```
+
+### DELETE /graph
+
+**Demo reset.** Deletes every saved source, node and edge (the tables and the database file
+stay). No confirmation and no authentication, so only use it locally.
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/graph
+```
+
+```json
+{ "status": "cleared" }
+```
+
+New ids keep counting up after a reset (they are not reused).
+
 ## What the frontend uses
 
 The frontend only needs **nodes + edges**. It never sees the AI's internal
@@ -214,7 +258,8 @@ Allowed values:
 
 No setup needed. The file `backend/data/nodex.db` and its tables are created
 automatically when the server starts (change the location with `DB_PATH` in `.env`).
-The `data/` folder is git-ignored. To reset everything, stop the server and delete `data/nodex.db`.
+The `data/` folder is git-ignored. To reset everything, call `DELETE /graph` (see above),
+or stop the server and delete `data/nodex.db`.
 
 | Table | Columns |
 |-------|---------|
@@ -226,13 +271,19 @@ The code uses Python's built-in `sqlite3` (no ORM, no extra dependency); all SQL
 
 ## Tests
 
+There are six standalone scripts (no pytest needed). Run each from `backend/`:
+
 ```powershell
-python tests/run_tests.py
+python tests/run_tests.py          # analyze, graph, node details, filtering, failure cases
+python tests/test_gemini_http.py   # Gemini HTTP request/response handling
+python tests/test_gemini_retry.py  # retry/backoff and quota-exhausted 429
+python tests/test_uploads.py       # PDF, DOCX, TXT/MD, PNG/JPG, validation errors
+python tests/test_reset.py         # DELETE /graph
+python tests/test_sources.py       # GET /sources
 ```
 
-Runs against a temporary database with a canned AI reply (inside the test file only),
-so no API key is needed. It covers analyze, graph, node details, filtering,
-and failure cases (no key, malformed AI output, blank input) leaving the database empty.
+They use a temporary database and mocked/canned AI replies (defined only inside the tests),
+so no API key and no network are needed.
 
 ## Project layout
 
@@ -245,7 +296,7 @@ app/
   models/graph.py                Node / Edge / GraphResponse (what the frontend consumes)
   models/analysis.py             Entity / Relationship / AnalysisResult (internal AI output)
   models/requests.py             request bodies
-  routes/                        health, upload, analyze, graph
+  routes/                        health, upload, analyze, graph, sources
   services/ai_service.py         provider-neutral AI call + output validation
   services/graph_mapper.py       AI entities/relationships -> API nodes/edges
   services/prompts.py            the NodeX analysis prompt
@@ -253,7 +304,7 @@ app/
   services/text_utils.py         text normalization
   services/file_validation.py    allowed upload types
   services/errors.py             errors mapped to HTTP codes
-tests/run_tests.py               plumbing tests
+tests/                           standalone test scripts (see Tests)
 ```
 
 ## Current limitations
@@ -261,10 +312,15 @@ tests/run_tests.py               plumbing tests
 - Image reading and scanned-PDF OCR depend on Gemini vision and need `GEMINI_API_KEY`; only the first 5 pages of a scanned PDF are read.
 - Legacy `.doc` is not supported; DOCX headers, footers, footnotes and text inside images are not extracted.
 - Input is capped at 20000 characters; longer uploads are truncated (`truncated: true`).
-- File type is checked by extension and declared content type, not file contents.
+- File type is checked by extension and declared content type; images and DOCX are also
+  checked by their contents (image signature, ZIP structure). Generic `application/octet-stream`
+  is only accepted for `.docx`.
 - Each `/analyze` call creates its own nodes. The same thing mentioned in two
   sources (e.g. "NodeX") becomes two separate nodes; there is no cross-source merging yet.
 - `/upload` does not save anything; only `/analyze` writes to the database.
-- No delete/update endpoints, no auth, and SQLite is for a single-server MVP only.
-- The AI is not retried on failure, and relationship quality depends on the model.
+- The only delete is `DELETE /graph` (wipes everything); there is no per-source delete or update.
+  No auth, and SQLite is for a single-server MVP only.
+- Gemini's free tier has a daily request limit (we saw 20/day for `gemini-3.7-flash`). When it is
+  exhausted, `/analyze` and image/OCR reading fail with a `502` carrying the provider's message.
+  Relationship quality depends on the model.
 - CORS allows all origins (local development).
