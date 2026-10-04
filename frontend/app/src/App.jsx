@@ -479,7 +479,11 @@ function App() {
     loading: true,
     error: null,
   });
+  // Selected document: drives the Knowledge Map filter and the "Current" badge.
   const [activeDocumentId, setActiveDocumentId] = useState(null);
+
+  // File shown in the Dashboard upload box. Independent of the selection above.
+  const [uploadDocumentId, setUploadDocumentId] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedNode, setSelectedNode] = useState(null);
@@ -662,6 +666,10 @@ function App() {
     return { nodes: buildGraphLayout(nodes), edges };
   }, [graph, laidOutGraph, scopeDocument, scopeSourceId]);
 
+  const scopeProcessing = ["uploading", "uploaded", "analyzing"].includes(
+    scopeDocument?.status
+  );
+
   const scopeEmptyMessage = scopeDocument
     ? scopeDocument.status === "failed"
       ? `${scopeDocument.file.name} could not be processed: ${scopeDocument.error}`
@@ -702,17 +710,17 @@ function App() {
     setSearchMessage("Settings restored to default.");
   };
 
-  const activeDocument =
+  const uploadDocument =
     documents.find(
-      (document) => document.id === activeDocumentId
+      (document) => document.id === uploadDocumentId
     ) || null;
 
-  const selectedFile = activeDocument?.file || null;
+  const selectedFile = uploadDocument?.file || null;
   const processing =
-  activeDocument?.status === "uploading" ||
-  activeDocument?.status === "uploaded" ||
-  activeDocument?.status === "analyzing";
-  const processed = activeDocument?.status === "processed";
+  uploadDocument?.status === "uploading" ||
+  uploadDocument?.status === "uploaded" ||
+  uploadDocument?.status === "analyzing";
+  const processed = uploadDocument?.status === "processed";
 
   /*
    * =========================
@@ -933,6 +941,7 @@ function App() {
     ]);
 
     setActiveDocumentId(newDocuments[0].id);
+    setUploadDocumentId(newDocuments[0].id);
     setSelectedNode(null);
     setSearchMessage("");
     setIsDragging(false);
@@ -977,17 +986,26 @@ function App() {
   };
 
   const removeFile = () => {
-    if (!activeDocumentId) return;
+    if (!uploadDocumentId) return;
+
+    const removedId = uploadDocumentId;
 
     setDocuments((currentDocuments) => {
       const remaining = currentDocuments.filter(
-        (document) => document.id !== activeDocumentId
+        (document) => document.id !== removedId
       );
 
       const nextDocument = remaining[0];
 
-      setActiveDocumentId(
-        nextDocument ? nextDocument.id : null
+      setUploadDocumentId(nextDocument ? nextDocument.id : null);
+
+      // Keep the selection unless it was the file just removed.
+      setActiveDocumentId((current) =>
+        current === removedId
+          ? nextDocument
+            ? nextDocument.id
+            : null
+          : current
       );
 
       return remaining;
@@ -1011,6 +1029,10 @@ function App() {
         );
 
         setSelectedNode(null);
+      }
+
+      if (documentId === uploadDocumentId) {
+        setUploadDocumentId(remaining[0] ? remaining[0].id : null);
       }
 
       return remaining;
@@ -1719,7 +1741,7 @@ function App() {
                       scopeDocument ? "No nodes for this document" : undefined
                     }
                     emptyMessage={scopeEmptyMessage}
-                    processing={processing}
+                    processing={scopeDocument ? scopeProcessing : processing}
                     selectedNode={selectedNode}
                     onSelect={selectNode}
                     full
