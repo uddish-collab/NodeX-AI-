@@ -56,40 +56,59 @@ uvicorn app.main:app --reload
 |--------|------------|--------------------------------------------------------------|
 | GET    | `/`        | Identifies the NodeX backend                                 |
 | GET    | `/health`  | Returns `{"status": "ok"}`                                   |
-| POST   | `/upload`  | Validates a PDF / image / text file and extracts its text    |
+| POST   | `/upload`  | Validates a PDF / DOCX / image / text file and extracts its text |
 | POST   | `/analyze` | Sends text to the AI, saves the result, returns nodes + edges |
 | GET    | `/graph`   | Returns the saved graph (nodes + edges), optional filters      |
 | GET    | `/graph/node/{id}` | Node details: connections + source                    |
 
 ### POST /upload
 
-Multipart form with a `file` field. Allowed: `.pdf`, `.txt`, `.md`, `.png`,
-`.jpg`, `.jpeg`, `.webp` (max 10 MB). Files are processed in memory, never saved.
+Multipart form with a `file` field. Returns the extracted, normalized `text`; send it to `/analyze`.
+
+| Format | Extensions | How text is read |
+|--------|-----------|------------------|
+| PDF | `.pdf` | Text layer via PyMuPDF. If the PDF has no text (scanned), the first 5 pages are read with Gemini vision (OCR) |
+| Word | `.docx` | Paragraphs and table rows from the document XML (standard library, no extra package) |
+| Text | `.txt`, `.md` | Decoded and whitespace-normalized |
+| Image | `.png`, `.jpg`, `.jpeg`, `.webp` | Gemini vision: transcribes text and briefly describes diagrams/screenshots |
+
+Max 10 MB. Files are processed in memory, never saved. Legacy `.doc` is not supported
+(the error tells the user to save as `.docx`).
+
+Image reading and scanned-PDF OCR always use Gemini, so they need `GEMINI_API_KEY`
+even if `AI_PROVIDER=openai`. Without a key, those files return `extraction_status: "not_configured"`
+(no fake text); PDFs with a text layer, DOCX and TXT still work without any key.
 
 ```bash
-curl -F "file=@notes.pdf;type=application/pdf" http://127.0.0.1:8000/upload
+curl -F "file=@notes.docx" http://127.0.0.1:8000/upload
 ```
 
 ```json
 {
-  "filename": "notes.pdf",
-  "content_type": "application/pdf",
+  "filename": "notes.docx",
+  "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "size": 12345,
   "status": "received",
-  "kind": "pdf",
+  "kind": "docx",
   "extraction_status": "extracted",
-  "text": "HackFusion deadline is 7 PM.
-NodeX uses an AI API.",
+  "extraction_method": "direct",
+  "text": "Project Plan
+NodeX uses an AI API.
+Owner | Deadline
+Alice | 7 PM",
   "truncated": false,
   "message": null
 }
 ```
 
-`extraction_status` is `extracted`, `no_text_found` (e.g. a scanned PDF), or
-`not_configured` (images, for now). Send the returned `text` to `/analyze`.
+- `kind`: `pdf`, `docx`, `text` or `image`.
+- `extraction_status`: `extracted`, `no_text_found`, or `not_configured`.
+- `extraction_method`: `direct` (read from the file) or `gemini_vision` (OCR / image reading).
+- `truncated`: text was cut to the 20000-character analysis limit.
 
-Errors: `400` empty/missing file, `413` too large, `415` unsupported type,
-`422` unreadable/corrupt/password-protected PDF.
+Errors: `400` empty/missing file, `413` too large, `415` unsupported type or wrong MIME type,
+`422` corrupt/unreadable file (bad PDF/DOCX/image, password-protected PDF),
+`502` Gemini failed while reading an image or scanned PDF.
 
 ### POST /analyze
 
@@ -239,8 +258,8 @@ tests/run_tests.py               plumbing tests
 
 ## Current limitations
 
-- Image/screenshot extraction is not implemented (`extract_from_image` reports "not configured").
-- Scanned PDFs without a text layer give no text (no OCR).
+- Image reading and scanned-PDF OCR depend on Gemini vision and need `GEMINI_API_KEY`; only the first 5 pages of a scanned PDF are read.
+- Legacy `.doc` is not supported; DOCX headers, footers, footnotes and text inside images are not extracted.
 - Input is capped at 20000 characters; longer uploads are truncated (`truncated: true`).
 - File type is checked by extension and declared content type, not file contents.
 - Each `/analyze` call creates its own nodes. The same thing mentioned in two

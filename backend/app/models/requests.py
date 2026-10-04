@@ -18,8 +18,9 @@ class UploadResponse(BaseModel):
     content_type: str
     size: int
     status: str  # "received"
-    kind: str  # "pdf" | "text" | "image"
+    kind: str  # "pdf" | "docx" | "text" | "image"
     extraction_status: str  # "extracted" | "no_text_found" | "not_configured"
+    extraction_method: str  # "direct" | "gemini_vision"
     text: str  # extracted text, ready to send to /analyze
     truncated: bool  # true if text was cut to the max length
     message: str | None = None

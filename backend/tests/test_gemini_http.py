@@ -19,6 +19,9 @@ os.environ["GEMINI_MODEL"] = "test-model"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.services import ai_service  # noqa: E402
+
+ai_service.time.sleep = lambda s: None  # retries must not really wait in tests
 
 GOOD = {
     "entities": [{"id": "e1", "name": "NodeX", "type": "project"},
@@ -78,7 +81,7 @@ with TestClient(app) as c:
               and "NodeX" in sent["systemInstruction"]["parts"][0]["text"]
               and "NodeX uses an AI API." in sent["contents"][0]["parts"][0]["text"])
 
-    with mock.patch(URLOPEN, side_effect=http_error(503, "UNAVAILABLE", "high demand")):
+    with mock.patch(URLOPEN, side_effect=lambda *a, **k: (_ for _ in ()).throw(http_error(503, "UNAVAILABLE", "high demand"))):
         r = c.post("/analyze", json=body)
         d = r.json()["detail"]
         check("HTTP 503 -> 502 with provider message", r.status_code == 502 and "503" in d and "UNAVAILABLE" in d and "high demand" in d)
